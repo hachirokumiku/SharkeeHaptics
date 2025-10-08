@@ -4,7 +4,7 @@ import time
 import threading
 import queue
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 from pythonosc import dispatcher
 from pythonosc import osc_server
 from pythonosc import udp_client
@@ -76,6 +76,9 @@ RESOLUTION_QUEUE = queue.Queue()  # For requesting hostname lookups
 
 # Global OSC Sender instance
 CLIENT_SENDER = udp_client.SimpleUDPClient("127.0.0.1", INTERNAL_OSC_PORT)
+
+# Track last received OSC message
+LAST_RECEIVED_OSC = {"address": "None", "value": 0.0}
 
 
 class HostnameResolver(threading.Thread):
@@ -164,15 +167,25 @@ def sharkeehaptics_router_handler(address, *args):
     and uses CACHED IPs only. Requests async resolution if IP is missing.
     """
     
-    global PACKETS_RECEIVED, PACKETS_ROUTED
+    global PACKETS_RECEIVED, PACKETS_ROUTED, LAST_RECEIVED_OSC
     PACKETS_RECEIVED += 1
     
     receiver_name = VRC_OSC_MAP.get(address)
     if not receiver_name:
         return
     
-    target_hostname = CLIENT_MAP.get(receiver_name)
+    # Track last received OSC message for GUI display
     current_intensity = float(args[0])
+    LAST_RECEIVED_OSC = {"address": address, "value": current_intensity}
+    
+    # Notify GUI to update last message display
+    GUI_QUEUE.put({
+        'type': 'LAST_MESSAGE_UPDATE',
+        'address': address,
+        'value': current_intensity
+    })
+    
+    target_hostname = CLIENT_MAP.get(receiver_name)
 
     # 1. Determine Target IP (MUST BE NON-BLOCKING)
     with CACHE_LOCK:
@@ -274,7 +287,8 @@ class SharkeeHapticsRouterApp(tk.Tk):
         self.is_running = False
         
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1) # Row indices adjusted
+        self.grid_rowconfigure(3, weight=1)  # Status table row
+        self.grid_rowconfigure(4, weight=1)  # Activity log row
         
         # Style Configuration
         self.style = ttk.Style(self)
@@ -313,12 +327,17 @@ class SharkeeHapticsRouterApp(tk.Tk):
         self.routed_label.config(text="Routed: 0")
 
     def _create_widgets(self):
-        # Row 0: Header and Controls
-        header_frame = ttk.Frame(self, style='TFrame', padding="15 15")
-        header_frame.grid(row=0, column=0, sticky="ew")
+        # Row 0: Header and Controls - with modular frame border
+        header_frame = tk.LabelFrame(self, text="  Control Panel  ", bg='#1F2937', fg='#10B981', 
+                                      font=('Inter', 11, 'bold'), relief=tk.RIDGE, bd=3,
+                                      labelanchor='n', padx=15, pady=15)
+        header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+        
+        # Title Section
         title_label = ttk.Label(header_frame, text="SharkeeHaptics Router", style='Header.TLabel')
         title_label.pack(side=tk.LEFT)
 
+        # Metrics Section
         metrics_frame = ttk.Frame(header_frame, style='TFrame')
         metrics_frame.pack(side=tk.RIGHT, padx=20)
         self.received_label = ttk.Label(metrics_frame, text="Received: 0", foreground='#FFEB3B', font=('Inter', 10, 'bold'))
@@ -326,18 +345,40 @@ class SharkeeHapticsRouterApp(tk.Tk):
         self.routed_label = ttk.Label(metrics_frame, text="Routed: 0", foreground='#4CAF50', font=('Inter', 10, 'bold'))
         self.routed_label.pack(side=tk.LEFT, padx=5)
         
+        # Status and Toggle
         self.status_label = ttk.Label(header_frame, text="STATUS: STOPPED", font=('Inter', 12, 'bold'), foreground='#FF5722')
         self.status_label.pack(side=tk.RIGHT, padx=20)
         self.toggle_button = ttk.Button(header_frame, text="Start Router", command=self.toggle_server, style='TButton')
         self.toggle_button.pack(side=tk.RIGHT)
         
-        # Row 1: Status Table
-        status_frame = ttk.Frame(self, style='TFrame', padding="10")
-        status_frame.grid(row=1, column=0, sticky="nsew") # Adjusted row index
+        # Row 0.5: Last Received OSC Message Display - with modular frame border
+        last_msg_frame = tk.LabelFrame(self, text="  Last Received OSC Message  ", bg='#1F2937', fg='#06B6D4',
+                                        font=('Inter', 10, 'bold'), relief=tk.RIDGE, bd=3,
+                                        labelanchor='n', padx=10, pady=8)
+        last_msg_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        
+        self.last_msg_label = ttk.Label(last_msg_frame, text="Address: None | Value: 0.00", 
+                                         foreground='#FBBF24', font=('Inter', 10, 'bold'))
+        self.last_msg_label.pack(anchor='w', padx=5)
+        
+        # Row 0.75: Action Buttons - with modular frame border
+        buttons_frame = tk.LabelFrame(self, text="  Actions  ", bg='#1F2937', fg='#10B981',
+                                       font=('Inter', 10, 'bold'), relief=tk.RIDGE, bd=3,
+                                       labelanchor='n', padx=10, pady=10)
+        buttons_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=5)
+        
+        ttk.Button(buttons_frame, text="Test All Clients", command=self._test_all_clients, style='TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Refresh Clients", command=self._refresh_all_clients, style='TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Clear Log", command=self._clear_log, style='TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons_frame, text="Help/About", command=self._show_help_about, style='TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Row 3: Status Table - with modular frame border
+        status_frame = tk.LabelFrame(self, text="  Client Connection Status  ", bg='#1F2937', fg='#06B6D4',
+                                      font=('Inter', 11, 'bold'), relief=tk.RIDGE, bd=3,
+                                      labelanchor='n', padx=10, pady=10)
+        status_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=5)
         status_frame.grid_columnconfigure(0, weight=1)
         status_frame.grid_rowconfigure(0, weight=1)
-        
-        ttk.Label(status_frame, text="Client Connection Status", style='SubHeader.TLabel').pack(anchor='w', pady=(0, 5))
 
         columns = ("vrc_receiver", "mdns_hostname", "resolved_ip", "intensity", "status")
         self.tree = ttk.Treeview(status_frame, columns=columns, show="headings", height=12) 
@@ -356,11 +397,12 @@ class SharkeeHapticsRouterApp(tk.Tk):
             item_id = self.tree.insert("", tk.END, values=(receiver, hostname, "---", "0.00", "UNKNOWN"))
             self.tree_ids[receiver] = item_id
 
-        # Row 2: Activity Log
-        log_frame = ttk.Frame(self, style='TFrame', padding="10")
-        log_frame.grid(row=2, column=0, sticky="nsew") # Adjusted row index
+        # Row 4: Activity Log - with modular frame border
+        log_frame = tk.LabelFrame(self, text="  Activity Log  ", bg='#1F2937', fg='#06B6D4',
+                                   font=('Inter', 11, 'bold'), relief=tk.RIDGE, bd=3,
+                                   labelanchor='n', padx=10, pady=10)
+        log_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=5)
         log_frame.grid_columnconfigure(0, weight=1); log_frame.grid_rowconfigure(0, weight=1);
-        ttk.Label(log_frame, text="Activity Log", style='SubHeader.TLabel').pack(anchor='w', pady=(5, 5))
 
         self.log_text = scrolledtext.ScrolledText(log_frame, state='disabled', wrap=tk.WORD, bg='#000000', fg='#FFFFFF', font=('Consolas', 9), height=10, border=0)
         self.log_text.pack(fill='both', expand=True)
@@ -380,6 +422,85 @@ class SharkeeHapticsRouterApp(tk.Tk):
             self.tree.focus(item_id)
             try: self.context_menu.tk_popup(event.x_root, event.y_root)
             finally: self.context_menu.grab_release()
+
+    # --- New Action Button Methods ---
+    
+    def _test_all_clients(self):
+        """Send a test signal to all clients (stub implementation)."""
+        self.log_to_gui("TEST ALL: Sending test signal to all clients...", 'INFO')
+        
+        test_intensity = 0.5  # 50% intensity test signal
+        
+        for receiver_name, hostname in CLIENT_MAP.items():
+            # Get the IP for each client
+            with CACHE_LOCK:
+                target_ip = GLOBAL_IP_OVERRIDES.get(receiver_name)
+                if not target_ip:
+                    cached_data = IP_CACHE.get(hostname)
+                    if cached_data:
+                        target_ip = cached_data.get('ip')
+            
+            if target_ip:
+                try:
+                    CLIENT_SENDER._address = target_ip
+                    CLIENT_SENDER._port = INTERNAL_OSC_PORT
+                    CLIENT_SENDER.send_message(INTERNAL_OSC_ADDRESS, test_intensity)
+                    self.log_to_gui(f"TEST: Sent {test_intensity:.2f} to {receiver_name} ({target_ip})", 'SUCCESS')
+                except Exception as e:
+                    self.log_to_gui(f"TEST FAILED: {receiver_name} ({target_ip}): {e}", 'ERROR')
+            else:
+                self.log_to_gui(f"TEST SKIPPED: {receiver_name} - No IP available", 'WARN')
+        
+        self.log_to_gui("TEST ALL: Complete", 'INFO')
+    
+    def _refresh_all_clients(self):
+        """Re-resolve all client IPs by clearing cache and requesting resolution."""
+        self.log_to_gui("REFRESH: Re-resolving all client IPs...", 'INFO')
+        
+        with CACHE_LOCK:
+            # Clear the IP cache to force re-resolution
+            IP_CACHE.clear()
+        
+        # Queue all hostnames for resolution
+        for hostname in CLIENT_MAP.values():
+            if hostname not in RESOLUTION_QUEUE.queue:
+                RESOLUTION_QUEUE.put(hostname)
+        
+        self.log_to_gui("REFRESH: All clients queued for IP resolution", 'SUCCESS')
+    
+    def _clear_log(self):
+        """Clear the activity log."""
+        self.log_text.config(state='normal')
+        self.log_text.delete('1.0', tk.END)
+        self.log_text.config(state='disabled')
+        self.log_to_gui("Activity log cleared", 'INFO')
+    
+    def _show_help_about(self):
+        """Show help/about dialog."""
+        help_text = """SharkeeHaptics Router
+        
+A haptic routing system for VRChat OSC messages.
+
+Usage:
+1. Click "Start Router" to begin listening for VRChat OSC messages
+2. The router will automatically discover haptic clients via mDNS
+3. Right-click on any client to manually set its IP address
+4. Monitor client status and activity in real-time
+
+Features:
+• Test All: Send a test signal to all connected clients
+• Refresh Clients: Re-resolve all client IP addresses
+• Clear Log: Clear the activity log display
+• Auto-discovery: Clients are automatically discovered via mDNS
+
+Configuration:
+• VRChat OSC Listen Port: 9001
+• Client OSC Port: 8000
+• mDNS Cache Timeout: 10 minutes
+
+For more information, visit the GitHub repository.
+"""
+        messagebox.showinfo("SharkeeHaptics Router - Help", help_text)
 
     # --- Manual IP Override/Clear Logic (Kept for addressing non-mDNS devices) ---
     def _show_ip_entry_popup(self):
@@ -509,6 +630,11 @@ class SharkeeHapticsRouterApp(tk.Tk):
                 elif data['type'] == 'COUNTER_UPDATE':
                     self.received_label.config(text=f"Received: {data['received']}")
                     self.routed_label.config(text=f"Routed: {data['routed']}")
+                elif data['type'] == 'LAST_MESSAGE_UPDATE':
+                    # Update the last received OSC message display
+                    address = data['address']
+                    value = data['value']
+                    self.last_msg_label.config(text=f"Address: {address} | Value: {value:.2f}")
             except queue.Empty:
                 break
             except Exception as e:
