@@ -12,8 +12,8 @@
 // ------------------------------------
 
 // *** WIFI CREDENTIALS - REPLACE THESE ***
-const char* ssid = "SHAW-0DBC_RPT2G";
-const char* password = "amaze6533energy";
+const char* ssid = "WIFI";
+const char* password = "PASSWORD";
 
 // This unit listens for the Python router on this port
 const unsigned int CLIENT_LISTENER_PORT = 8000;
