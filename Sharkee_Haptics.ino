@@ -148,7 +148,7 @@ static inline uint8_t intensityToRealtimeValue(float intensity) {
 
 void setMotorBlendedRTP(float intensity) {
   intensity = constrain(intensity, 0.0f, 1.0f);
-  
+  intensity = 1.0f - intensity;
   // --- 1. STOP CONDITION ---
   if (intensity < MIN_INTENSITY_THRESHOLD) {
     if (isMotorRunning) {
