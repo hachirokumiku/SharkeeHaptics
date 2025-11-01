@@ -1,10 +1,7 @@
 /*
-  Sharkee_Haptics_Final_Expressive_v2.ino
-  A fully refined sketch for the DRV2605, featuring:
-  1. 10-Step Library Mapping for texture variety.
-  2. Amplitude Scaling (Gain) for intensity realism.
-  3. Complex Waveform Sequence for the strongest impact.
-  4. Refined mapping logic for smoother control.
+  Sharkee_Haptics_Final_Expressive_v3_FIXED.ino
+  FIX: Replaced unsupported drv.setAmplitude() with drv.setGlobalGain().
+  Maps 0.0-1.0 intensity to 10 haptic textures and 4 gain levels (0-3).
 */
 
 #include <ESP8266WiFi.h>
@@ -52,10 +49,11 @@ const uint8_t FX_IMPACT_HIT = 49;     // Initial, sharpest impact
 const uint8_t FX_RESIDUAL_HUM = 37;   // Residual shudder/ring
 const uint8_t FX_PAUSE = 0xFF;        // Special effect ID for a pause
 const uint8_t SEQUENCE_TRIGGER_INDEX = 9; // Index that triggers the complex sequence
-const uint8_t MIN_GAIN = 15;            // Minimum amplitude gain (out of 100)
-const uint8_t MAX_GAIN = 100;           // Maximum amplitude gain
+// Gain is now controlled via the 0-3 register, not 0-100.
+const uint8_t MIN_GAIN_LEVEL = 1;     // Minimum gain register value (1-3)
+const uint8_t MAX_GAIN_LEVEL = 3;     // Maximum gain register value (1-3)
 
-// Device Naming and Configuration (EEPROM remains unchanged)
+// Device Naming and Configuration
 #define EEPROM_SIZE 32
 #define RECEIVER_NAME_ADDR 1
 #define GAMMA_ADDR 2         
@@ -68,7 +66,7 @@ const char* receiverNames[NUM_RECEIVERS] = {
   "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
 };
 int assignedReceiverIndex = 0;
-float GAMMA = 2.2f; // Gamma retained for EEPROM consistency
+float GAMMA = 2.2f;
 
 // ------------------------------------
 // --- Global Objects ---
@@ -92,7 +90,7 @@ float getBatteryPercent() {
 }
 
 // ------------------------------------
-// --- Haptic Control: Core Logic ---
+// --- Haptic Control: Core Logic (FIXED) ---
 // ------------------------------------
 
 void setMotorLibraryEffect(float intensity) {
@@ -103,28 +101,29 @@ void setMotorLibraryEffect(float intensity) {
   
   // --- A. STOP CONDITION ---
   if (invertedIntensity < MIN_INTENSITY_THRESHOLD) {
+    drv.setGlobalGain(0); // Set gain to 0 (off) before standby
     drv.stop();
     drv.setMode(0); // Standby
     return;
   }
   
   // --- B. NORMALIZATION & MAPPING ---
-  // Normalize intensity above the threshold to 0.0-1.0 range
   float normalizedIntensity = (invertedIntensity - MIN_INTENSITY_THRESHOLD) / (1.0f - MIN_INTENSITY_THRESHOLD);
   normalizedIntensity = constrain(normalizedIntensity, 0.0f, 1.0f);
   
-  // Map 0.0-1.0 to array index 0 to NUM_EFFECTS - 1 (which is 0 to 9)
   int effectIndex = (int)roundf(normalizedIntensity * (NUM_EFFECTS - 1));
   
-  // --- C. CALCULATE AMPLITUDE GAIN (for realism) ---
-  // Scale normalized intensity (0.0-1.0) to gain (MIN_GAIN to MAX_GAIN)
-  uint8_t gainRange = MAX_GAIN - MIN_GAIN;
-  uint8_t gain_percent = (uint8_t)roundf(normalizedIntensity * gainRange) + MIN_GAIN;
-  gain_percent = constrain(gain_percent, MIN_GAIN, MAX_GAIN); 
+  // --- C. CALCULATE AMPLITUDE GAIN (Mapped to 1-3 Register Value) ---
+  // Map normalizedIntensity (0.0 to 1.0) to gain steps 1, 2, or 3.
+  // This replaces the old 0-100 percent logic.
+  uint8_t gain_level = (uint8_t)roundf(normalizedIntensity * (MAX_GAIN_LEVEL - MIN_GAIN_LEVEL)) + MIN_GAIN_LEVEL;
+  gain_level = constrain(gain_level, MIN_GAIN_LEVEL, MAX_GAIN_LEVEL); 
 
   // --- D. EXECUTE WAVEFORM ---
   drv.setMode(1); // Internal Trigger/Library Playback Mode
-  drv.setAmplitude(gain_percent); // Apply gain to the entire sequence/effect
+  
+  // *** FIX: Correct function call for amplitude/gain control ***
+  drv.setGlobalGain(gain_level); 
 
   if (effectIndex == SEQUENCE_TRIGGER_INDEX) {
     // 10th level: COMPLEX HIT SEQUENCE
@@ -166,7 +165,6 @@ void handleRouterOscInput() {
         intensity = msg.getFloat(0);
       } else if (msg.isInt(0)) {
         int val = msg.getInt(0);
-        // Handle both 0-255 and 0-100 integer ranges
         if (val > 1 && val <= 255) {
           intensity = (float)val / 255.0f;
         } else if (val >= 0 && val <= 100) {
@@ -191,15 +189,22 @@ void handleStatusJSON() {
   json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"haptic_mode\":\"10-Step Library + Amplitude Scaling\"";
+  json += "\"haptic_mode\":\"10-Step Library + Global Gain (0-3)\"";
   json += "}";
   httpServer.send(200, "application/json", json);
 }
 
-// Helper to run a single waveform test
-void runTestWaveform(uint8_t effect, uint8_t gain) {
+// Helper to run a single waveform test (FIXED)
+void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
     drv.setMode(1);
-    drv.setAmplitude(gain);
+    
+    // Convert 0-100% test gain to 1-3 register level
+    uint8_t gain_level = (uint8_t)roundf(((float)gain_percent / 100.0f) * (MAX_GAIN_LEVEL - MIN_GAIN_LEVEL)) + MIN_GAIN_LEVEL;
+    gain_level = constrain(gain_level, MIN_GAIN_LEVEL, MAX_GAIN_LEVEL);
+    
+    // *** FIX: Correct function call ***
+    drv.setGlobalGain(gain_level); 
+    
     drv.setWaveform(0, effect);
     drv.setWaveform(1, 0);
     drv.go();
@@ -217,24 +222,28 @@ void handleConfigAction() {
     if (action == "test_all") {
       // Test the first 9 effects with escalating gain
       for(int i = 0; i < NUM_EFFECTS - 1; i++) {
-          // Calculate gain for testing, mimicking the internal logic
+          // Calculate gain for testing (0-100)
           float testNormalized = (float)i / (NUM_EFFECTS - 2);
-          uint8_t gain = (uint8_t)roundf(testNormalized * (MAX_GAIN - MIN_GAIN)) + MIN_GAIN;
-          runTestWaveform(MAX_EFFECT_ARRAY[i], gain);
+          uint8_t gain_percent = (uint8_t)roundf(testNormalized * 90.0f) + 10;
+          runTestWaveform(MAX_EFFECT_ARRAY[i], gain_percent);
           delay(100); 
       }
+      
       // Test the complex sequence at max gain (100)
       drv.setMode(1); 
-      drv.setAmplitude(MAX_GAIN);
+      // *** FIX: Max gain (100) maps to the highest register value (3) ***
+      drv.setGlobalGain(MAX_GAIN_LEVEL); 
+      
       drv.setWaveform(0, FX_IMPACT_HIT);    
       drv.setWaveform(1, FX_PAUSE);         
       drv.setWaveform(2, FX_RESIDUAL_HUM);  
       drv.setWaveform(3, 0);                
       drv.go();
       delay(800);
+      drv.setGlobalGain(0); // Reset gain
       drv.setMode(0);
       
-      response = "Tested all 10 levels (9 single + 1 sequence) with amplitude ramping. Switched back to standby.";
+      response = "Tested all 10 levels (9 single + 1 sequence) with global gain ramping. Switched back to standby.";
     }
     else if (action == "set_receiver" && httpServer.hasArg("index")) {
       int newIndex = httpServer.arg("index").toInt();
@@ -256,7 +265,7 @@ void handleConfigPage() {
     String html = "<html><head><title>Haptic Device Config</title>";
     html += "<style>body{font-family:Arial;background-color:#222;color:#eee;} .container{max-width:400px;margin:50px auto;padding:20px;background-color:#333;border-radius:8px;} h2{color:#4CAF50;} label, select, input, button{display:block;width:100%;margin-bottom:10px;padding:8px;border-radius:4px;} select, input{background-color:#444;color:#eee;border:1px solid #555;} button{background-color:#9C27B0;color:white;border:none;cursor:pointer;} .status{margin-top:15px;padding:10px;background-color:#444;border-radius:4px;}</style>";
     html += "</head><body><div class='container'><h2>Max Expressive Haptics Config</h2>";
-    html += "<p>Mode: <b>10-Step Library + Amplitude Scaling</b></p>";
+    html += "<p>Mode: <b>10-Step Library + Global Gain (0-3)</b></p>";
     html += "<p>Hostname: <b>" + String(receiverNames[assignedReceiverIndex]) + ".local</b></p>";
     html += "<p>IP Address: <b>" + WiFi.localIP().toString() + "</b></p>";
     html += "<p>Battery: <b>" + String((int)getBatteryPercent()) + "%</b></p>";
@@ -300,17 +309,9 @@ void setup() {
     while (1) delay(100);
   }
   
-  // DRV2605 Configuration: CALIBRATION is essential for LRA
-  // Auto-calibrate should be run once per actuator. 
-  // For production, you would save these values, but for a dev sketch:
-  // drv.setMode(6); // Auto-calibration mode
-  // drv.go();
-  // while (!drv.isCalibrating());
-  // while (drv.isCalibrating());
-  // drv.setMode(0); // Back to standby
-  
   drv.useLRA(); 
   drv.selectLibrary(LRA_LIBRARY); 
+  drv.setGlobalGain(0); // Ensure gain is off at startup
   drv.setMode(0); // Start in Standby mode
 
   // Wi-Fi Connection
