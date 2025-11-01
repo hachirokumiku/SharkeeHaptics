@@ -1,11 +1,12 @@
 /*
-  Sharkee_Haptics_Final_Expressive_v13_CONSOLIDATED.ino
-  
-  Features:
-  1. AP Provisioning Mode (Captive Portal) for easy Wi-Fi setup.
-  2. Station Mode (OSC + Web Config) for operation.
-  3. Haptic Control: 10-Step Library Effects with Amplitude Modulation 
-     (using PatternAgents/Haptic_DRV2605 library).
+ Sharkee_Haptics_Final_Expressive_v14_ERROR_FIXED.ino
+ 
+ FIXED: Reverted Haptic control to use:
+ - drv.setGain() instead of drv.setAmplitude()
+ - drv.setLibrary() instead of drv.selectLibrary()
+ - Enumerated values (e.g., STANDBY_MODE, REGISTER_MODE) for drv.setMode()
+ 
+ This version is compatible with the older/alternative PatternAgents library fork.
 */
 
 // *** Haptic Library Includes (PatternAgents) ***
@@ -30,7 +31,7 @@ const char *AP_SSID = "SHARKEE_HAPTICS_SETUP";
 const char *AP_PASSWORD = "password"; 
 IPAddress apIP(192, 168, 4, 1);
 
-// EEPROM Address Map (Ensure EEPROM_SIZE is large enough: 128 bytes)
+// EEPROM Address Map
 #define EEPROM_SIZE 128         
 #define RECEIVER_NAME_ADDR 1    
 #define WIFI_FLAG_ADDR 10       
@@ -62,17 +63,17 @@ const uint8_t FX_RESIDUAL_HUM = 37;
 const uint8_t FX_PAUSE = 0xFF;        
 const uint8_t SEQUENCE_TRIGGER_INDEX = 9; 
 
-// AMPLITUDE SCALING (0-255 range for PatternAgents setAmplitude)
-const uint8_t MIN_AMP_SCALE = 20;     
-const uint8_t MAX_AMP_SCALE = 255;    
+// AMPLITUDE SCALING: Now mapped to a 0-100 range for setGain()
+const uint8_t MIN_GAIN_SCALE = 10;     // Minimum gain when active (10%)
+const uint8_t MAX_GAIN_SCALE = 100;    // Maximum gain (100%)
 
 // Device Naming and Configuration
 #define BATTERY_LEVEL_PIN A0 
 
 const int NUM_RECEIVERS = 11; 
 const char* receiverNames[NUM_RECEIVERS] = {
-  "head", "chest", "upperarm_l", "upperarm_r", "hips", "upperleg_l",
-  "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
+ "head", "chest", "upperarm_l", "upperarm_r", "hips", "upperleg_l",
+ "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
 };
 int assignedReceiverIndex = 0;
 
@@ -82,7 +83,7 @@ int assignedReceiverIndex = 0;
 ESP8266WebServer httpServer(80);
 DNSServer dnsServer; 
 WiFiUDP Udp;
-Haptic_DRV2605 drv; // Correct class for PatternAgents library
+Haptic_DRV2605 drv; 
 char incomingPacket[256];
 
 // ------------------------------------
@@ -91,26 +92,29 @@ char incomingPacket[256];
 
 void setupHaptics() {
   // DRV2605 Initialization
-  // Using the PatternAgents library's success check
   if (drv.begin() != HAPTIC_SUCCESS) {
     Serial.println("DRV2605 not found. Check wiring.");
-    // In final application, you might want to bypass this and continue non-haptic functions
     while (1) delay(100); 
   }
   
   drv.setActuatorType(LRA); 
-  drv.selectLibrary(LRA_LIBRARY); 
-  drv.setAmplitude(0); // Set amplitude off
-  drv.setMode(0); // Standby
+  // FIX: Using setLibrary() instead of selectLibrary()
+  drv.setLibrary(LRA_LIBRARY); 
+  
+  // FIX: Using setGain() with the 0-100 scale instead of setAmplitude()
+  drv.setGain(0); 
+  
+  // FIX: Using the enumerated type STANDBY_MODE (which is typically 0)
+  drv.setMode(STANDBY_MODE); 
 }
 
 float getBatteryPercent() {
-  const float V_FULL = 4.2f;
-  const float V_EMPTY = 3.3f;
-  int raw = analogRead(BATTERY_LEVEL_PIN);
-  float voltage = raw * (3.3f / 1023.0f);
-  float percent = (voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100.0f;
-  return constrain(percent, 0.0f, 100.0f);
+ const float V_FULL = 4.2f;
+ const float V_EMPTY = 3.3f;
+ int raw = analogRead(BATTERY_LEVEL_PIN);
+ float voltage = raw * (3.3f / 1023.0f);
+ float percent = (voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100.0f;
+ return constrain(percent, 0.0f, 100.0f);
 }
 
 void setMotorLibraryEffect(float intensity) {
@@ -120,9 +124,10 @@ void setMotorLibraryEffect(float intensity) {
   
   // --- A. STOP CONDITION ---
   if (invertedIntensity < MIN_INTENSITY_THRESHOLD) {
-    drv.setAmplitude(0); 
+    // FIX: Using setGain(0) and STANDBY_MODE
+    drv.setGain(0); 
     drv.stop();
-    drv.setMode(0); 
+    drv.setMode(STANDBY_MODE); 
     return;
   }
   
@@ -132,13 +137,15 @@ void setMotorLibraryEffect(float intensity) {
   
   int effectIndex = (int)roundf(normalizedIntensity * (NUM_EFFECTS - 1));
   
-  // --- C. CALCULATE AMPLITUDE GAIN (Mapped to 20-255) ---
-  uint8_t amp_value = (uint8_t)roundf(normalizedIntensity * (MAX_AMP_SCALE - MIN_AMP_SCALE)) + MIN_AMP_SCALE;
-  amp_value = constrain(amp_value, MIN_AMP_SCALE, MAX_AMP_SCALE); 
+  // --- C. CALCULATE AMPLITUDE GAIN (Mapped to MIN_GAIN_SCALE to MAX_GAIN_SCALE: 10-100) ---
+  uint8_t gain_value = (uint8_t)roundf(normalizedIntensity * (MAX_GAIN_SCALE - MIN_GAIN_SCALE)) + MIN_GAIN_SCALE;
+  gain_value = constrain(gain_value, MIN_GAIN_SCALE, MAX_GAIN_SCALE); 
 
   // --- D. EXECUTE WAVEFORM ---
-  drv.setMode(1); // Internal Trigger/Library Playback Mode
-  drv.setAmplitude(amp_value); 
+  // FIX: Using REGISTER_MODE (which is typically 1)
+  drv.setMode(REGISTER_MODE); 
+  // FIX: Using setGain()
+  drv.setGain(gain_value); 
 
   if (effectIndex == SEQUENCE_TRIGGER_INDEX) {
     // 10th level: COMPLEX HIT SEQUENCE
@@ -159,48 +166,55 @@ void setMotorLibraryEffect(float intensity) {
 
 // Helper to run a single waveform test
 void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
-    drv.setMode(1);
-    uint8_t amp_value = (uint8_t)roundf(((float)gain_percent / 100.0f) * (MAX_AMP_SCALE - MIN_AMP_SCALE)) + MIN_AMP_SCALE;
-    amp_value = constrain(amp_value, MIN_AMP_SCALE, MAX_AMP_SCALE);
-    drv.setAmplitude(amp_value); 
+    // FIX: Using REGISTER_MODE
+    drv.setMode(REGISTER_MODE);
+    
+    // Scale 0-100 test gain to the MIN_GAIN_SCALE to MAX_GAIN_SCALE (10-100)
+    uint8_t gain_value = (uint8_t)roundf(((float)gain_percent / 100.0f) * (MAX_GAIN_SCALE - MIN_GAIN_SCALE)) + MIN_GAIN_SCALE;
+    gain_value = constrain(gain_value, MIN_GAIN_SCALE, MAX_GAIN_SCALE);
+    
+    // FIX: Using setGain()
+    drv.setGain(gain_value); 
+    
     drv.setWaveform(0, effect);
     drv.setWaveform(1, 0);
     drv.go();
     delay(400); 
-    drv.setMode(0); 
+    // FIX: Using STANDBY_MODE
+    drv.setMode(STANDBY_MODE); 
 }
 
 // ------------------------------------
-// --- Network & Communication ---
+// --- Network & Communication (Unchanged) ---
 // ------------------------------------
 
 void handleRouterOscInput() {
-  int packetSize = Udp.parsePacket();
-  if (packetSize != 0) {
-    int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
-    if (len <= 0) return;
-    OSCMessage msg;
-    msg.fill((uint8_t*)incomingPacket, len);
+ int packetSize = Udp.parsePacket();
+ if (packetSize != 0) {
+  int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
+  if (len <= 0) return;
+  OSCMessage msg;
+  msg.fill((uint8_t*)incomingPacket, len);
 
-    char addressBuffer[64];
-    msg.getAddress(addressBuffer);
+  char addressBuffer[64];
+  msg.getAddress(addressBuffer);
 
-    if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
-      float intensity = 0.0f;
-      
-      if (msg.isFloat(0)) {
-        intensity = msg.getFloat(0);
-      } else if (msg.isInt(0)) {
-        int val = msg.getInt(0);
-        if (val > 1 && val <= 255) {
-          intensity = (float)val / 255.0f;
-        } else if (val >= 0 && val <= 100) {
-          intensity = (float)val / 100.0f;
-        }
-      }
-      setMotorLibraryEffect(intensity); 
-    }
-  }
+  if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
+   float intensity = 0.0f;
+   
+   if (msg.isFloat(0)) {
+    intensity = msg.getFloat(0);
+   } else if (msg.isInt(0)) {
+    int val = msg.getInt(0);
+    if (val > 1 && val <= 255) {
+     intensity = (float)val / 255.0f;
+    } else if (val >= 0 && val <= 100) {
+     intensity = (float)val / 100.0f;
+    }
+   }
+   setMotorLibraryEffect(intensity); 
+  }
+ }
 }
 
 
@@ -209,17 +223,17 @@ void handleRouterOscInput() {
 // ------------------------------------
 
 void handleStatusJSON() {
-  String json = "{";
-  json += "\"role\":\"Client (Max Expressive Haptics)\","; 
-  json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
-  json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
-  json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
-  json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"haptic_mode\":\"10-Step Library + Amplitude (0-255)\"";
-  json += "}";
-  httpServer.send(200, "application/json", json);
+ String json = "{";
+ json += "\"role\":\"Client (Max Expressive Haptics)\","; 
+ json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
+ json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
+ json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
+ json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
+ json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+ json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+ json += "\"haptic_mode\":\"10-Step Library + Gain (0-100)\""; // Updated Mode Name
+ json += "}";
+ httpServer.send(200, "application/json", json);
 }
 
 void handleConfigAction() {
@@ -236,16 +250,22 @@ void handleConfigAction() {
           runTestWaveform(MAX_EFFECT_ARRAY[i], gain_percent);
           delay(100); 
       }
-      drv.setMode(1); 
-      drv.setAmplitude(MAX_AMP_SCALE); 
+      // Complex sequence test at max gain
+      // FIX: Using REGISTER_MODE
+      drv.setMode(REGISTER_MODE); 
+      // FIX: Using setGain(MAX_GAIN_SCALE)
+      drv.setGain(MAX_GAIN_SCALE); 
+      
       drv.setWaveform(0, FX_IMPACT_HIT);    
       drv.setWaveform(1, FX_PAUSE);         
       drv.setWaveform(2, FX_RESIDUAL_HUM);  
       drv.setWaveform(3, 0);                
       drv.go();
       delay(800);
-      drv.setAmplitude(0); 
-      drv.setMode(0);
+      
+      // FIX: Using setGain(0) and STANDBY_MODE
+      drv.setGain(0); 
+      drv.setMode(STANDBY_MODE);
       response = "Tested all 10 levels with amplitude ramping. Switched back to standby.";
     }
     else if (action == "set_receiver" && httpServer.hasArg("index")) {
@@ -265,7 +285,7 @@ void handleConfigPage() {
     html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     html += "<style>body{font-family:Arial;background-color:#222;color:#eee;} .container{max-width:400px;margin:50px auto;padding:20px;background-color:#333;border-radius:8px;} h2{color:#4CAF50;} label, select, input, button{display:block;width:100%;margin-bottom:10px;padding:8px;border-radius:4px;} select, input{background-color:#444;color:#eee;border:1px solid #555;} button{background-color:#9C27B0;color:white;border:none;cursor:pointer;}</style>";
     html += "</head><body><div class='container'><h2>Max Expressive Haptics Config</h2>";
-    html += "<p>Mode: <b>10-Step Library + Amplitude (0-255)</b></p>";
+    html += "<p>Mode: <b>10-Step Library + Gain (0-100)</b></p>"; // Updated Mode Name
     html += "<p>Hostname: <b>" + String(receiverNames[assignedReceiverIndex]) + ".local</b></p>";
     html += "<p>IP Address: <b>" + WiFi.localIP().toString() + "</b></p>";
     html += "<p>Battery: <b>" + String((int)getBatteryPercent()) + "%</b></p>";
@@ -281,7 +301,6 @@ void handleConfigPage() {
     html += "</div></body></html>";
     httpServer.send(200, "text/html", html);
 }
-
 
 // ------------------------------------
 // --- Web Server Handlers (AP MODE) ---
@@ -307,7 +326,6 @@ void handleWifiSave() {
     String new_pass = httpServer.arg("pass");
 
     if (new_ssid.length() > 0 && new_ssid.length() <= 31) {
-        // Save credentials to EEPROM
         new_ssid.toCharArray(storedSSID, sizeof(storedSSID));
         new_pass.toCharArray(storedPASS, sizeof(storedPASS));
 
@@ -327,7 +345,6 @@ void handleWifiSave() {
 }
 
 void handleNotFound() {
-    // Redirect all requests in AP mode to the config page
     httpServer.sendHeader("Location", "http://" + apIP.toString(), true);
     httpServer.send(302, "text/plain", "Redirecting to config portal...");
 }
@@ -338,8 +355,6 @@ void handleNotFound() {
 
 void setupAPMode() {
     inAPMode = true; 
-
-    // Setup AP
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
     WiFi.softAP(AP_SSID, AP_PASSWORD);
@@ -349,10 +364,8 @@ void setupAPMode() {
     Serial.print(" | IP: ");
     Serial.println(WiFi.softAPIP());
 
-    // Setup DNS Server for Captive Portal
     dnsServer.start(53, "*", apIP); 
 
-    // Setup Web Server Handlers for Provisioning
     httpServer.on("/", handleWifiConfig);
     httpServer.on("/save", HTTP_POST, handleWifiSave);
     httpServer.onNotFound(handleNotFound);
@@ -361,7 +374,6 @@ void setupAPMode() {
 
 
 void setupStationMode() {
-    // Connect to stored Wi-Fi
     Serial.printf("Connecting to %s...", storedSSID);
     WiFi.mode(WIFI_STA);
     WiFi.begin(storedSSID, storedPASS);
@@ -378,10 +390,8 @@ void setupStationMode() {
         Serial.print("IP Address: ");
         Serial.println(WiFi.localIP());
 
-        // Haptics Setup (Only runs on successful Wi-Fi)
         setupHaptics();
 
-        // Network Services Setup
         String hostname = String(receiverNames[assignedReceiverIndex]);
         if (MDNS.begin(hostname.c_str())) {
             Serial.printf("mDNS responder started: %s.local\n", hostname.c_str());
@@ -390,16 +400,15 @@ void setupStationMode() {
         Udp.begin(CLIENT_LISTENER_PORT);
         Serial.printf("Listening for OSC on UDP port %u\n", CLIENT_LISTENER_PORT);
 
-        // Standard Haptics Config Web Server
         httpServer.on("/", handleConfigPage);
         httpServer.on("/status", handleStatusJSON);
         httpServer.on("/action", HTTP_POST, handleConfigAction);
         httpServer.begin();
 
-        inAPMode = false; // Run the normal loop
+        inAPMode = false;
     } else {
         Serial.println("\nConnection failed! Starting AP Mode for provisioning.");
-        setupAPMode(); // Fallback to AP mode
+        setupAPMode(); 
     }
 }
 
@@ -419,22 +428,20 @@ void setup() {
       EEPROM.get(SSID_ADDR, storedSSID);
       EEPROM.get(PASS_ADDR, storedPASS);
       if (strlen(storedSSID) > 1) {
-          setupStationMode(); // Attempt to connect
+          setupStationMode(); 
       } else {
-          setupAPMode(); // Data corrupted, start AP Mode
+          setupAPMode(); 
       }
   } else {
-      setupAPMode(); // No credentials saved, start AP mode
+      setupAPMode(); 
   }
 }
 
 void loop() {
   if (inAPMode) {
-    // AP Provisioning Loop
     dnsServer.processNextRequest();
     httpServer.handleClient();
   } else {
-    // Station/Application Loop
     handleRouterOscInput(); 
     httpServer.handleClient();
     MDNS.update();
