@@ -11,7 +11,7 @@
 #include <WiFiUdp.h>
 #include <OSCMessage.h>
 #include <Wire.h> 
-
+#include <EEPROM.h>
 // ------------------------------------
 // --- Configuration & Constants ---
 // ------------------------------------
