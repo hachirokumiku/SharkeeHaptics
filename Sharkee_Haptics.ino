@@ -1,21 +1,12 @@
 /*
-  Sharkee_Haptics_Final_Expressive_v15_LOW_LEVEL.ino
-  
-  FIXED: All Haptic control methods now use low-level direct register writes (drv.writeRegister()).
-  
-  Registers Used:
-   - MODE (0x01) 
-   - LIBRARY (0x03)
-   - WAVEFORM_SEQ (0x04-0x0B)
-   - GO (0x0C)
-   - RATED_VOLTAGE (0x16) / ODT_GAIN (0x17) (Used for LRA Gain Control)
-   - FEEDBACK_CONTROL (0x1A)
-   - CONTROL3 (0x1D)
-   - CONTROL4 (0x1E)
+ Sharkee_Haptics_Final_Expressive_v17.ino
+ 
+ FIXED: Added the required '0xFF' bitmask as the third argument to all 
+ drv.writeRegBits() calls to comply with the library's function signature.
 */
 
-// *** Haptic Library Includes (Keeping the basic object) ***
-#include "Haptic_DRV2605.h"
+// *** Haptic Library Includes ***
+#include "Haptic_DRV2605.h" 
 
 // *** Core ESP/Networking Includes ***
 #include <ESP8266WiFi.h>
@@ -30,6 +21,9 @@
 // ------------------------------------
 // --- Configuration & Constants ---
 // ------------------------------------
+
+// DRV2605 I2C Address
+#define DRV2605_ADDR 0x5A 
 
 // DRV2605 Register Definitions (Low-Level Control)
 #define REG_MODE 0x01
@@ -92,8 +86,8 @@ const uint8_t MAX_GAIN_VALUE = 127;    // Maximum gain value (0x7F)
 
 const int NUM_RECEIVERS = 11; 
 const char* receiverNames[NUM_RECEIVERS] = {
-  "head", "chest", "upperarm_l", "upperarm_r", "hips", "upperleg_l",
-  "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
+ "head", "chest", "upperarm_l", "upperarm_r", "hips", "upperleg_l",
+ "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
 };
 int assignedReceiverIndex = 0;
 
@@ -107,7 +101,7 @@ Haptic_DRV2605 drv;
 char incomingPacket[256];
 
 // ------------------------------------
-// --- Haptic Control: Core Logic (Low-Level) ---
+// --- Haptic Control: Core Logic (Library Fix) ---
 // ------------------------------------
 
 void setupHaptics() {
@@ -118,27 +112,28 @@ void setupHaptics() {
   }
   
   // 2. Set Actuator Type and Feedback/Control Registers for LRA
-  drv.writeRegister(REG_MODE, 0b00000000); // Out of standby
-  drv.setActuatorType(LRA); 
-  drv.writeRegister(REG_LIBRARY, LRA_LIBRARY); // Set LRA library (6)
+  // FIX: Added 0xFF mask as the third argument to all writeRegBits calls
+  drv.writeRegBits(REG_MODE, 0xFF, 0b00000000); // Out of standby
+  drv.setActuatorType(LRA); // Use the library helper for this specific setting
+  drv.writeRegBits(REG_LIBRARY, 0xFF, LRA_LIBRARY); // Set LRA library (6)
   
-  // Set LRA specific control registers for optimal performance (similar to Adafruit init)
-  drv.writeRegister(0x1A, 0b10110100); // Set Feedback Control: LRA, Auto-Cal, 2.0ms Sample Time
-  drv.writeRegister(REG_CONTROL3, 0b10100000); // Set Control3: LRA_DRIVE_MODE to 'Open-Loop' (required for setting ODT_GAIN)
-  drv.writeRegister(REG_CONTROL4, 0b00100000); // Set Control4: Auto-Brake (0x20)
+  // Set LRA specific control registers for optimal performance
+  drv.writeRegBits(0x1A, 0xFF, 0b10110100); // Set Feedback Control: LRA, Auto-Cal, 2.0ms Sample Time
+  drv.writeRegBits(REG_CONTROL3, 0xFF, 0b10100000); // Set Control3: LRA_DRIVE_MODE to 'Open-Loop'
+  drv.writeRegBits(REG_CONTROL4, 0xFF, 0b00100000); // Set Control4: Auto-Brake (0x20)
   
   // 3. Set Initial Gain and Standby
-  drv.writeRegister(REG_ODT_GAIN, 0b00000000); // Gain off (0x00)
-  drv.writeRegister(REG_MODE, MODE_STANDBY); // Enter standby mode (0x40)
+  drv.writeRegBits(REG_ODT_GAIN, 0xFF, 0b00000000); // Gain off (0x00)
+  drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY); // Enter standby mode (0x40)
 }
 
 float getBatteryPercent() {
-  const float V_FULL = 4.2f;
-  const float V_EMPTY = 3.3f;
-  int raw = analogRead(BATTERY_LEVEL_PIN);
-  float voltage = raw * (3.3f / 1023.0f);
-  float percent = (voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100.0f;
-  return constrain(percent, 0.0f, 100.0f);
+ const float V_FULL = 4.2f;
+ const float V_EMPTY = 3.3f;
+ int raw = analogRead(BATTERY_LEVEL_PIN);
+ float voltage = raw * (3.3f / 1023.0f);
+ float percent = (voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100.0f;
+ return constrain(percent, 0.0f, 100.0f);
 }
 
 void setMotorLibraryEffect(float intensity) {
@@ -148,8 +143,9 @@ void setMotorLibraryEffect(float intensity) {
   
   // --- A. STOP CONDITION ---
   if (invertedIntensity < MIN_INTENSITY_THRESHOLD) {
-    drv.writeRegister(REG_ODT_GAIN, 0x00); // Gain off
-    drv.writeRegister(REG_MODE, MODE_STANDBY); // Standby
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_ODT_GAIN, 0xFF, 0x00); // Gain off
+    drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY); // Standby
     return;
   }
   
@@ -164,42 +160,49 @@ void setMotorLibraryEffect(float intensity) {
   gain_value = constrain(gain_value, MIN_GAIN_VALUE, MAX_GAIN_VALUE); 
 
   // --- D. EXECUTE WAVEFORM ---
-  drv.writeRegister(REG_MODE, MODE_INTERNAL_TRIGGER); // Internal Trigger/Playback Mode
-  drv.writeRegister(REG_ODT_GAIN, gain_value); // Set Gain
+  // FIX: Added 0xFF mask
+  drv.writeRegBits(REG_MODE, 0xFF, MODE_INTERNAL_TRIGGER); // Internal Trigger/Playback Mode
+  drv.writeRegBits(REG_ODT_GAIN, 0xFF, gain_value); // Set Gain
 
   if (effectIndex == SEQUENCE_TRIGGER_INDEX) {
     // 10th level: COMPLEX HIT SEQUENCE
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 0, FX_IMPACT_HIT);    
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 1, FX_PAUSE);         
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 2, FX_RESIDUAL_HUM);  
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 3, 0); // Terminate
-    drv.writeRegister(REG_GO, 0x01); // Go!
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, FX_IMPACT_HIT);    
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, FX_PAUSE);         
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 2, 0xFF, FX_RESIDUAL_HUM);  
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 3, 0xFF, 0); // Terminate
+    drv.writeRegBits(REG_GO, 0xFF, 0x01); // Go!
     
   } else {
     // Levels 0-8: SINGLE EFFECT from the array
     uint8_t effect_to_play = MAX_EFFECT_ARRAY[effectIndex];
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 0, effect_to_play); 
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 1, 0); // Terminate
-    drv.writeRegister(REG_GO, 0x01); // Go!
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, effect_to_play); 
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, 0); // Terminate
+    drv.writeRegBits(REG_GO, 0xFF, 0x01); // Go!
   }
 }
 
 // Helper to run a single waveform test
 void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
-    drv.writeRegister(REG_MODE, MODE_INTERNAL_TRIGGER);
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_MODE, 0xFF, MODE_INTERNAL_TRIGGER);
     
     // Scale 0-100 test gain to the MIN_GAIN_VALUE to MAX_GAIN_VALUE (20-127)
     uint8_t gain_value = (uint8_t)roundf(((float)gain_percent / 100.0f) * (MAX_GAIN_VALUE - MIN_GAIN_VALUE)) + MIN_GAIN_VALUE;
     gain_value = constrain(gain_value, MIN_GAIN_VALUE, MAX_GAIN_VALUE);
     
-    drv.writeRegister(REG_ODT_GAIN, gain_value); 
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_ODT_GAIN, 0xFF, gain_value); 
     
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 0, effect);
-    drv.writeRegister(REG_WAVEFORM_SEQ_START + 1, 0);
-    drv.writeRegister(REG_GO, 0x01); 
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, effect);
+    drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, 0);
+    drv.writeRegBits(REG_GO, 0xFF, 0x01); 
     delay(400); 
     
-    drv.writeRegister(REG_MODE, MODE_STANDBY); 
+    // FIX: Added 0xFF mask
+    drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY); 
 }
 
 // ------------------------------------
@@ -207,32 +210,32 @@ void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
 // ------------------------------------
 
 void handleRouterOscInput() {
-  int packetSize = Udp.parsePacket();
-  if (packetSize != 0) {
-    int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
-    if (len <= 0) return;
-    OSCMessage msg;
-    msg.fill((uint8_t*)incomingPacket, len);
+ int packetSize = Udp.parsePacket();
+ if (packetSize != 0) {
+  int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
+  if (len <= 0) return;
+  OSCMessage msg;
+  msg.fill((uint8_t*)incomingPacket, len);
 
-    char addressBuffer[64];
-    msg.getAddress(addressBuffer);
+  char addressBuffer[64];
+  msg.getAddress(addressBuffer);
 
-    if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
-      float intensity = 0.0f;
-      
-      if (msg.isFloat(0)) {
-        intensity = msg.getFloat(0);
-      } else if (msg.isInt(0)) {
-        int val = msg.getInt(0);
-        if (val > 1 && val <= 255) {
-          intensity = (float)val / 255.0f;
-        } else if (val >= 0 && val <= 100) {
-          intensity = (float)val / 100.0f;
-        }
-      }
-      setMotorLibraryEffect(intensity); 
-    }
-  }
+  if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
+   float intensity = 0.0f;
+   
+   if (msg.isFloat(0)) {
+    intensity = msg.getFloat(0);
+   } else if (msg.isInt(0)) {
+    int val = msg.getInt(0);
+    if (val > 1 && val <= 255) {
+     intensity = (float)val / 255.0f;
+    } else if (val >= 0 && val <= 100) {
+     intensity = (float)val / 100.0f;
+    }
+   }
+   setMotorLibraryEffect(intensity); 
+  }
+ }
 }
 
 
@@ -241,17 +244,17 @@ void handleRouterOscInput() {
 // ------------------------------------
 
 void handleStatusJSON() {
-  String json = "{";
-  json += "\"role\":\"Client (Max Expressive Haptics)\","; 
-  json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
-  json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
-  json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
-  json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"haptic_mode\":\"10-Step Library + Low-Level Gain (0-127)\""; 
-  json += "}";
-  httpServer.send(200, "application/json", json);
+ String json = "{";
+ json += "\"role\":\"Client (Max Expressive Haptics)\","; 
+ json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
+ json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
+ json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
+ json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
+ json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+ json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+ json += "\"haptic_mode\":\"10-Step Library + Ultra Low-Level Gain (0-127)\""; 
+ json += "}";
+ httpServer.send(200, "application/json", json);
 }
 
 void handleConfigAction() {
@@ -270,18 +273,19 @@ void handleConfigAction() {
       }
       
       // Complex sequence test at max gain
-      drv.writeRegister(REG_MODE, MODE_INTERNAL_TRIGGER);
-      drv.writeRegister(REG_ODT_GAIN, MAX_GAIN_VALUE); 
+      // FIX: Added 0xFF mask
+      drv.writeRegBits(REG_MODE, 0xFF, MODE_INTERNAL_TRIGGER);
+      drv.writeRegBits(REG_ODT_GAIN, 0xFF, MAX_GAIN_VALUE); 
       
-      drv.writeRegister(REG_WAVEFORM_SEQ_START + 0, FX_IMPACT_HIT);    
-      drv.writeRegister(REG_WAVEFORM_SEQ_START + 1, FX_PAUSE);         
-      drv.writeRegister(REG_WAVEFORM_SEQ_START + 2, FX_RESIDUAL_HUM);  
-      drv.writeRegister(REG_WAVEFORM_SEQ_START + 3, 0);                
-      drv.writeRegister(REG_GO, 0x01);
+      drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, FX_IMPACT_HIT);    
+      drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, FX_PAUSE);         
+      drv.writeRegBits(REG_WAVEFORM_SEQ_START + 2, 0xFF, FX_RESIDUAL_HUM);  
+      drv.writeRegBits(REG_WAVEFORM_SEQ_START + 3, 0xFF, 0);                
+      drv.writeRegBits(REG_GO, 0xFF, 0x01);
       delay(800);
       
-      drv.writeRegister(REG_ODT_GAIN, 0x00);
-      drv.writeRegister(REG_MODE, MODE_STANDBY);
+      drv.writeRegBits(REG_ODT_GAIN, 0xFF, 0x00);
+      drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY);
       response = "Tested all 10 levels with amplitude ramping. Switched back to standby.";
     }
     else if (action == "set_receiver" && httpServer.hasArg("index")) {
@@ -301,7 +305,7 @@ void handleConfigPage() {
     html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     html += "<style>body{font-family:Arial;background-color:#222;color:#eee;} .container{max-width:400px;margin:50px auto;padding:20px;background-color:#333;border-radius:8px;} h2{color:#4CAF50;} label, select, input, button{display:block;width:100%;margin-bottom:10px;padding:8px;border-radius:4px;} select, input{background-color:#444;color:#eee;border:1px solid #555;} button{background-color:#9C27B0;color:white;border:none;cursor:pointer;}</style>";
     html += "</head><body><div class='container'><h2>Max Expressive Haptics Config</h2>";
-    html += "<p>Mode: <b>10-Step Library + Low-Level Gain (0-127)</b></p>"; 
+    html += "<p>Mode: <b>10-Step Library + Ultra Low-Level Gain (0-127)</b></p>"; 
     html += "<p>Hostname: <b>" + String(receiverNames[assignedReceiverIndex]) + ".local</b></p>";
     html += "<p>IP Address: <b>" + WiFi.localIP().toString() + "</b></p>";
     html += "<p>Battery: <b>" + String((int)getBatteryPercent()) + "%</b></p>";
@@ -405,6 +409,7 @@ void setupStationMode() {
         Serial.print("IP Address: ");
         Serial.println(WiFi.localIP());
 
+        Wire.begin(); // Ensure Wire (I2C) is initialized before talking to DRV2605
         setupHaptics();
 
         String hostname = String(receiverNames[assignedReceiverIndex]);
@@ -429,7 +434,7 @@ void setupStationMode() {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(); 
+  Wire.begin(); // Initialized here for EEPROM/AP Mode and checked again in Station Mode.
   EEPROM.begin(EEPROM_SIZE);
 
   assignedReceiverIndex = EEPROM.read(RECEIVER_NAME_ADDR);
