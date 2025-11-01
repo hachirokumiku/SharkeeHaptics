@@ -1,7 +1,7 @@
 /*
-  Sharkee_Haptics_Final_Expressive_v3_FIXED.ino
-  FIX: Replaced unsupported drv.setAmplitude() with drv.setGlobalGain().
-  Maps 0.0-1.0 intensity to 10 haptic textures and 4 gain levels (0-3).
+  Sharkee_Haptics_Final_Expressive_v4_RTP_FIXED.ino
+  FIX: Replaced unsupported drv.setGlobalGain() with drv.setRTPInput().
+  Maps 0.0-1.0 intensity to 10 haptic textures and 0-255 RTP scale.
 */
 
 #include <ESP8266WiFi.h>
@@ -49,9 +49,9 @@ const uint8_t FX_IMPACT_HIT = 49;     // Initial, sharpest impact
 const uint8_t FX_RESIDUAL_HUM = 37;   // Residual shudder/ring
 const uint8_t FX_PAUSE = 0xFF;        // Special effect ID for a pause
 const uint8_t SEQUENCE_TRIGGER_INDEX = 9; // Index that triggers the complex sequence
-// Gain is now controlled via the 0-3 register, not 0-100.
-const uint8_t MIN_GAIN_LEVEL = 1;     // Minimum gain register value (1-3)
-const uint8_t MAX_GAIN_LEVEL = 3;     // Maximum gain register value (1-3)
+// Gain is now controlled via the 0-255 RTP scale
+const uint8_t MIN_RTP_SCALE = 20;     // Minimum RTP scale (out of 255) to ensure perceptibility
+const uint8_t MAX_RTP_SCALE = 255;    // Maximum RTP scale
 
 // Device Naming and Configuration
 #define EEPROM_SIZE 32
@@ -90,7 +90,7 @@ float getBatteryPercent() {
 }
 
 // ------------------------------------
-// --- Haptic Control: Core Logic (FIXED) ---
+// --- Haptic Control: Core Logic (FIXED - Using setRTPInput) ---
 // ------------------------------------
 
 void setMotorLibraryEffect(float intensity) {
@@ -101,7 +101,8 @@ void setMotorLibraryEffect(float intensity) {
   
   // --- A. STOP CONDITION ---
   if (invertedIntensity < MIN_INTENSITY_THRESHOLD) {
-    drv.setGlobalGain(0); // Set gain to 0 (off) before standby
+    // *** FIX: Use setRTPInput(0) to turn off the scale/vibrator ***
+    drv.setRTPInput(0); 
     drv.stop();
     drv.setMode(0); // Standby
     return;
@@ -113,17 +114,15 @@ void setMotorLibraryEffect(float intensity) {
   
   int effectIndex = (int)roundf(normalizedIntensity * (NUM_EFFECTS - 1));
   
-  // --- C. CALCULATE AMPLITUDE GAIN (Mapped to 1-3 Register Value) ---
-  // Map normalizedIntensity (0.0 to 1.0) to gain steps 1, 2, or 3.
-  // This replaces the old 0-100 percent logic.
-  uint8_t gain_level = (uint8_t)roundf(normalizedIntensity * (MAX_GAIN_LEVEL - MIN_GAIN_LEVEL)) + MIN_GAIN_LEVEL;
-  gain_level = constrain(gain_level, MIN_GAIN_LEVEL, MAX_GAIN_LEVEL); 
+  // --- C. CALCULATE AMPLITUDE GAIN (Mapped to 0-255 RTP Scale Value) ---
+  uint8_t scale_value = (uint8_t)roundf(normalizedIntensity * (MAX_RTP_SCALE - MIN_RTP_SCALE)) + MIN_RTP_SCALE;
+  scale_value = constrain(scale_value, MIN_RTP_SCALE, MAX_RTP_SCALE); 
 
   // --- D. EXECUTE WAVEFORM ---
   drv.setMode(1); // Internal Trigger/Library Playback Mode
   
   // *** FIX: Correct function call for amplitude/gain control ***
-  drv.setGlobalGain(gain_level); 
+  drv.setRTPInput(scale_value); 
 
   if (effectIndex == SEQUENCE_TRIGGER_INDEX) {
     // 10th level: COMPLEX HIT SEQUENCE
@@ -189,7 +188,7 @@ void handleStatusJSON() {
   json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"haptic_mode\":\"10-Step Library + Global Gain (0-3)\"";
+  json += "\"haptic_mode\":\"10-Step Library + RTP Scale (0-255)\"";
   json += "}";
   httpServer.send(200, "application/json", json);
 }
@@ -198,12 +197,12 @@ void handleStatusJSON() {
 void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
     drv.setMode(1);
     
-    // Convert 0-100% test gain to 1-3 register level
-    uint8_t gain_level = (uint8_t)roundf(((float)gain_percent / 100.0f) * (MAX_GAIN_LEVEL - MIN_GAIN_LEVEL)) + MIN_GAIN_LEVEL;
-    gain_level = constrain(gain_level, MIN_GAIN_LEVEL, MAX_GAIN_LEVEL);
+    // Convert 0-100% test gain to 20-255 RTP scale
+    uint8_t scale_value = (uint8_t)roundf(((float)gain_percent / 100.0f) * (MAX_RTP_SCALE - MIN_RTP_SCALE)) + MIN_RTP_SCALE;
+    scale_value = constrain(scale_value, MIN_RTP_SCALE, MAX_RTP_SCALE);
     
     // *** FIX: Correct function call ***
-    drv.setGlobalGain(gain_level); 
+    drv.setRTPInput(scale_value); 
     
     drv.setWaveform(0, effect);
     drv.setWaveform(1, 0);
@@ -231,8 +230,8 @@ void handleConfigAction() {
       
       // Test the complex sequence at max gain (100)
       drv.setMode(1); 
-      // *** FIX: Max gain (100) maps to the highest register value (3) ***
-      drv.setGlobalGain(MAX_GAIN_LEVEL); 
+      // *** FIX: Max gain (100) maps to the highest RTP scale (255) ***
+      drv.setRTPInput(MAX_RTP_SCALE); 
       
       drv.setWaveform(0, FX_IMPACT_HIT);    
       drv.setWaveform(1, FX_PAUSE);         
@@ -240,10 +239,10 @@ void handleConfigAction() {
       drv.setWaveform(3, 0);                
       drv.go();
       delay(800);
-      drv.setGlobalGain(0); // Reset gain
+      drv.setRTPInput(0); // Reset scale
       drv.setMode(0);
       
-      response = "Tested all 10 levels (9 single + 1 sequence) with global gain ramping. Switched back to standby.";
+      response = "Tested all 10 levels (9 single + 1 sequence) with RTP scale ramping. Switched back to standby.";
     }
     else if (action == "set_receiver" && httpServer.hasArg("index")) {
       int newIndex = httpServer.arg("index").toInt();
@@ -261,38 +260,10 @@ void handleConfigAction() {
   httpServer.send(status_code, "text/plain", response);
 }
 
-void handleConfigPage() {
-    String html = "<html><head><title>Haptic Device Config</title>";
-    html += "<style>body{font-family:Arial;background-color:#222;color:#eee;} .container{max-width:400px;margin:50px auto;padding:20px;background-color:#333;border-radius:8px;} h2{color:#4CAF50;} label, select, input, button{display:block;width:100%;margin-bottom:10px;padding:8px;border-radius:4px;} select, input{background-color:#444;color:#eee;border:1px solid #555;} button{background-color:#9C27B0;color:white;border:none;cursor:pointer;} .status{margin-top:15px;padding:10px;background-color:#444;border-radius:4px;}</style>";
-    html += "</head><body><div class='container'><h2>Max Expressive Haptics Config</h2>";
-    html += "<p>Mode: <b>10-Step Library + Global Gain (0-3)</b></p>";
-    html += "<p>Hostname: <b>" + String(receiverNames[assignedReceiverIndex]) + ".local</b></p>";
-    html += "<p>IP Address: <b>" + WiFi.localIP().toString() + "</b></p>";
-    html += "<p>Battery: <b>" + String((int)getBatteryPercent()) + "%</b></p>";
-    
-    // Test Button (Test all 10 library effects)
-    html += "<form action='/action' method='post'><input type='hidden' name='action' value='test_all'><button type='submit'>Run Full Ramping Test Sequence</button></form>";
-
-    // Set Receiver Dropdown
-    html += "<form action='/action' method='post'><label for='receiver_index'>Set Receiver (Hostname)</label><select id='receiver_index' name='index'>";
-    for(int i=0; i<NUM_RECEIVERS; i++) {
-        html += "<option value='" + String(i) + "'" + (i == assignedReceiverIndex ? " selected" : "") + ">" + receiverNames[i] + "</option>";
-    }
-    html += "</select><input type='hidden' name='action' value='set_receiver'><button type='submit'>Change Receiver & Restart</button></form>";
-
-    html += "</div></body></html>";
-    httpServer.send(200, "text/html", html);
-}
-
-// ------------------------------------
-// --- Setup and Loop ---
-// ------------------------------------
-
 void setup() {
   Serial.begin(115200);
   Wire.begin(); 
 
-  // Initialize EEPROM and load settings
   EEPROM.begin(EEPROM_SIZE);
   assignedReceiverIndex = EEPROM.read(RECEIVER_NAME_ADDR);
   if (assignedReceiverIndex < 0 || assignedReceiverIndex >= NUM_RECEIVERS) {
@@ -311,10 +282,11 @@ void setup() {
   
   drv.useLRA(); 
   drv.selectLibrary(LRA_LIBRARY); 
-  drv.setGlobalGain(0); // Ensure gain is off at startup
+  // *** FIX: Use setRTPInput(0) to ensure motor is quiet at startup ***
+  drv.setRTPInput(0); 
   drv.setMode(0); // Start in Standby mode
 
-  // Wi-Fi Connection
+  // Wi-Fi Connection and rest of setup...
   Serial.printf("Connecting to %s...", ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -326,17 +298,14 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // mDNS Setup
   String hostname = String(receiverNames[assignedReceiverIndex]);
   if (MDNS.begin(hostname.c_str())) {
     Serial.printf("mDNS responder started: %s.local\n", hostname.c_str());
   }
 
-  // OSC Setup
   Udp.begin(CLIENT_LISTENER_PORT);
   Serial.printf("Listening for OSC on UDP port %u\n", CLIENT_LISTENER_PORT);
 
-  // Web Server Setup
   httpServer.on("/", handleConfigPage);
   httpServer.on("/status", handleStatusJSON);
   httpServer.on("/action", HTTP_POST, handleConfigAction);
