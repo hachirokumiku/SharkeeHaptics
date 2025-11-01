@@ -1,7 +1,7 @@
 /*
- Turnkey_Sharkee_Haptics_HD_Rumble_RTP.ino
- A complete, ready-to-run sketch for smooth, high-definition haptic rumble
- using the DRV2605 Real-Time Playback (RTP) mode.
+ Turnkey_Sharkee_Haptics_Blended_Click_Rumble.ino
+ Logic: Quick, low-intensity tap plays a single Waveform Click.
+     Sustained or high intensity drives a smooth RTP Rumble.
 */
 
 #include <ESP8266WiFi.h>
@@ -11,7 +11,9 @@
 #include <WiFiUdp.h>
 #include <OSCMessage.h>
 #include <Wire.h> 
-#include <EEPROM.h>
+// *** FIX: EEPROM Library Added ***
+#include <EEPROM.h> 
+
 // ------------------------------------
 // --- Configuration & Constants ---
 // ------------------------------------
@@ -19,25 +21,29 @@
 // *** ⚠️ REQUIRED: REPLACE THESE PLACEHOLDERS WITH YOUR WIFI CREDENTIALS ⚠️ ***
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-// *************************************************************************
 
 // Network
 const unsigned int CLIENT_LISTENER_PORT = 8000;
 const char* INTERNAL_OSC_ADDRESS = "/sharkeehaptics/set_intensity";
 
-// Haptic Logic (HD Rumble Configuration)
+// Haptic Logic (Blended Configuration)
 bool isMotorRunning = false; 
 bool isInRealtimeMode = false; 
 const float MIN_INTENSITY_THRESHOLD = 0.05f; 
-// RTP takes over immediately for any intensity above the threshold.
-const float REALTIME_THRESHOLD = 0.05f; 
+// NEW THRESHOLD: Separates the low-level click from the continuous rumble
+const float WAVEFORM_RTP_THRESHOLD = 0.35f; 
 
-const unsigned long REALTIME_TIMEOUT_MS = 500; // Stop motor if no update in 500ms
+const unsigned long REALTIME_TIMEOUT_MS = 500; 
 unsigned long lastReceivedMs = 0;
+
+// DRV2605 Specifics
+const uint8_t LRA_LIBRARY = 6;
+// Waveform 1 is typically a sharp click in the LRA library.
+const uint8_t LRA_SHARP_CLICK = 1; 
 
 // Perceptual Mapping (Gamma)
 bool USE_GAMMA_MAPPING = true;
-float GAMMA = 2.2f; // Standard compensation for human perception
+float GAMMA = 2.2f; 
 
 // Device Naming and Configuration (Used for Web/mDNS)
 #define EEPROM_SIZE 32
@@ -65,14 +71,12 @@ char incomingPacket[256];
 // --- Helper Functions ---
 // ------------------------------------
 
-// Applies a power curve (Gamma correction) to the intensity for a better feel.
 float applyGammaMapping(float intensity) {
  intensity = constrain(intensity, 0.0f, 1.0f);
  if (!USE_GAMMA_MAPPING) return intensity;
  return powf(intensity, GAMMA);
 }
 
-// Retrieves estimated battery percentage (requires correct voltage divider/circuit)
 float getBatteryPercent() {
  const float V_FULL = 4.2f;
  const float V_EMPTY = 3.3f;
@@ -83,10 +87,10 @@ float getBatteryPercent() {
 }
 
 // ------------------------------------
-// --- Haptic Control: The Core RTP Rumble Logic ---
+// --- Haptic Control: The Blended Logic ---
 // ------------------------------------
 
-void setMotorRTPRumble(float intensity) {
+void setMotorBlendedRTP(float intensity) {
   intensity = constrain(intensity, 0.0f, 1.0f);
   
   // CRITICAL: INVERT INTENSITY DIRECTION (0.0=Far/Weak to 1.0=Near/Strong)
@@ -95,7 +99,8 @@ void setMotorRTPRumble(float intensity) {
   // --- 1. STOP CONDITION ---
   if (intensity < MIN_INTENSITY_THRESHOLD) {
     if (isMotorRunning) {
-      drv.setRealtimeValue(0); 
+      // Ensure motor is stopped from either RTP or Waveform modes
+      if (isInRealtimeMode) drv.setRealtimeValue(0); 
       drv.setMode(0); // Switch to Standby
       isMotorRunning = false;
       isInRealtimeMode = false;
@@ -104,34 +109,55 @@ void setMotorRTPRumble(float intensity) {
     return;
   }
   
-  // --- 2. HD RUMBLE: Realtime Buzz ---
-  if (!isInRealtimeMode) {
-    // Enable Realtime Mode if we are currently in standby/another mode
-    drv.setMode(DRV2605_MODE_REALTIME);
-    isInRealtimeMode = true;
-    drv.stop(); // Stop any legacy waveform sequence
+  // --- 2. WAVEFORM CLICK MODE (Low Intensity / Quick Tap) ---
+  // If intensity is above min threshold but below the rumble threshold
+  if (intensity < WAVEFORM_RTP_THRESHOLD) {
+    if (isInRealtimeMode) {
+      // Must stop RTP before switching to Waveform mode
+      drv.setRealtimeValue(0);
+      drv.setMode(1); // Set to Library/Internal Trigger Mode
+      isInRealtimeMode = false;
+    }
+    
+    // Play a single click effect
+    drv.setWaveform(0, LRA_SHARP_CLICK); 
+    drv.setWaveform(1, 0); // End sequence
+    drv.go();
+    
+    isMotorRunning = true;
   }
   
-  // Calculate amplitude with Gamma correction
-  float correctedIntensity = applyGammaMapping(intensity);
-  // Scale to 0-255 range for the DRV2605 RTP register
-  uint8_t amplitude = (uint8_t)roundf(correctedIntensity * 255.0f); 
-  
-  // Set the continuous drive value
-  drv.setRealtimeValue(amplitude); 
-  
+  // --- 3. HD RUMBLE: Realtime Buzz (Sustained / High Intensity) ---
+  else { // intensity >= WAVEFORM_RTP_THRESHOLD
+    if (!isInRealtimeMode) {
+      // Switch to Realtime Mode once
+      drv.setMode(DRV2605_MODE_REALTIME);
+      isInRealtimeMode = true;
+      drv.stop(); // Stop any pending waveform sequence
+    }
+    
+    // Calculate amplitude with Gamma correction
+    float correctedIntensity = applyGammaMapping(intensity);
+    uint8_t amplitude = (uint8_t)roundf(correctedIntensity * 255.0f); 
+    
+    // Set the continuous drive value for the HD Rumble
+    drv.setRealtimeValue(amplitude); 
+    
+    isMotorRunning = true;
+  }
+
   lastReceivedMs = millis(); 
-  isMotorRunning = true;
 }
 
 // Stop motor if no updates recently
 void checkRealtimeTimeout() {
+  // Only check for timeout if we are currently in the continuous RTP mode
   if (isMotorRunning && isInRealtimeMode) {
     unsigned long now = millis();
     if (now - lastReceivedMs > REALTIME_TIMEOUT_MS) {
       // Gracefully stop the RTP mode
       drv.setRealtimeValue(0);
-      drv.setMode(0);
+      drv.setMode(0); // Standby
       isMotorRunning = false;
       isInRealtimeMode = false;
     }
@@ -159,7 +185,6 @@ void handleRouterOscInput() {
    if (msg.isFloat(0)) {
     intensity = msg.getFloat(0);
    } else if (msg.isInt(0)) {
-    // Allows receiving int 0-255 or 0-100 and converting to float 0.0-1.0
     int val = msg.getInt(0);
     if (val > 1 && val <= 255) {
      intensity = (float)val / 255.0f;
@@ -167,16 +192,19 @@ void handleRouterOscInput() {
      intensity = (float)val / 100.0f;
     }
    }
-   setMotorRTPRumble(intensity); 
+   // Use the new blended logic
+   setMotorBlendedRTP(intensity); 
   }
  }
 }
 
-// --- Web Server Handlers (Simplified for Turnkey) ---
+// ------------------------------------
+// --- Web Server Handlers (Unchanged from previous turnkey) ---
+// ------------------------------------
 
 void handleStatusJSON() {
  String json = "{";
- json += "\"role\":\"Client (HD Rumble RTP Mode)\","; 
+ json += "\"role\":\"Client (Blended Click/Rumble Mode)\","; 
  json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
  json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
  json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
@@ -191,13 +219,14 @@ void handleStatusJSON() {
 void handleConfigPage() {
     String html = "<html><head><title>Haptic Device Config</title>";
     html += "<style>body{font-family:Arial;background-color:#222;color:#eee;} .container{max-width:400px;margin:50px auto;padding:20px;background-color:#333;border-radius:8px;} h2{color:#4CAF50;} label, select, input, button{display:block;width:100%;margin-bottom:10px;padding:8px;border-radius:4px;} select, input{background-color:#444;color:#eee;border:1px solid #555;} button{background-color:#9C27B0;color:white;border:none;cursor:pointer;} .status{margin-top:15px;padding:10px;background-color:#444;border-radius:4px;}</style>";
-    html += "</head><body><div class='container'><h2>HD Rumble Configuration</h2>";
+    html += "</head><body><div class='container'><h2>Blended Haptic Configuration</h2>";
     html += "<p>Hostname: <b>" + String(receiverNames[assignedReceiverIndex]) + ".local</b></p>";
     html += "<p>IP Address: <b>" + WiFi.localIP().toString() + "</b></p>";
     html += "<p>Gamma Correction: <b>" + String(GAMMA, 2) + "</b></p>";
     html += "<p>Battery: <b>" + String((int)getBatteryPercent()) + "%</b></p>";
+    html += "<p>Mode: <b>Click (Low) to Rumble (High)</b></p>";
     
-    // Test Button
+    // Test Button (Re-uses the RTP ramp for a full system check)
     html += "<form action='/action' method='post'><input type='hidden' name='action' value='test'><button type='submit'>Run Rumble Test</button></form>";
 
     // Set Receiver Dropdown
@@ -215,7 +244,7 @@ void handleConfigPage() {
 }
 
 void handleConfigAction() {
-  // Simple action handler for the web page (re-uses logic from previous turns)
+  // Simple action handler for the web page
   String response = "OK";
   int status_code = 200;
   if (httpServer.method() != HTTP_POST) { status_code = 405; response = "Method not allowed."; } 
@@ -223,7 +252,7 @@ void handleConfigAction() {
     String action = httpServer.arg("action");
 
     if (action == "test") {
-      // Test sequence: ramp up and down
+      // Test sequence: ramp up and down (RTP is best for demonstrating range)
       if (!isInRealtimeMode) { drv.setMode(DRV2605_MODE_REALTIME); isInRealtimeMode = true; }
       isMotorRunning = true; 
       for (int v = 0; v <= 255; v += 25) { drv.setRealtimeValue((uint8_t)v); delay(30); }
@@ -234,7 +263,6 @@ void handleConfigAction() {
     else if (action == "set_receiver" && httpServer.hasArg("index")) {
       int newIndex = httpServer.arg("index").toInt();
       if (newIndex >= 0 && newIndex < NUM_RECEIVERS) {
-        // Simple EEPROM write for receiver index (omitting device ID as it's not strictly necessary)
         EEPROM.write(RECEIVER_NAME_ADDR, newIndex); EEPROM.commit();
         response = "Receiver set to " + String(receiverNames[newIndex]) + ". Restarting...";
         httpServer.send(status_code, "text/plain", response); delay(100); ESP.restart();
@@ -244,7 +272,6 @@ void handleConfigAction() {
       float newGamma = httpServer.arg("gamma").toFloat();
       if (newGamma >= 0.5f && newGamma <= 6.0f) {
         GAMMA = newGamma;
-        // Simple EEPROM write for gamma
         EEPROM.put(GAMMA_ADDR, GAMMA); EEPROM.write(GAMMA_FLAG_ADDR, 0xA5); EEPROM.commit();
         response = "Gamma updated to " + String(GAMMA, 2) + ".";
       } else { status_code = 400; response = "Invalid gamma (must be between 0.5 and 6.0)."; }
@@ -265,7 +292,7 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   assignedReceiverIndex = EEPROM.read(RECEIVER_NAME_ADDR);
   if (assignedReceiverIndex < 0 || assignedReceiverIndex >= NUM_RECEIVERS) {
-    assignedReceiverIndex = 0; // Default to 'head'
+    assignedReceiverIndex = 0; 
   }
   
   if (EEPROM.read(GAMMA_FLAG_ADDR) == 0xA5) {
@@ -279,9 +306,9 @@ void setup() {
     while (1) delay(100);
   }
   
-  // Configure DRV2605 for LRA motor and RTP
-  drv.useLRA(); // Use Linear Resonant Actuator mode
-  drv.selectLibrary(6); // Library 6 is the LRA-specific library
+  // Configure DRV2605 for LRA motor and Blended operation
+  drv.useLRA(); 
+  drv.selectLibrary(LRA_LIBRARY); 
   drv.setMode(0); // Start in Standby mode
 
   // Wi-Fi Connection
@@ -296,7 +323,7 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
 
-  // mDNS Setup (Use the receiver name as the hostname for easy discovery)
+  // mDNS Setup
   String hostname = String(receiverNames[assignedReceiverIndex]);
   if (MDNS.begin(hostname.c_str())) {
     Serial.printf("mDNS responder started: %s.local\n", hostname.c_str());
@@ -314,15 +341,8 @@ void setup() {
 }
 
 void loop() {
-  // Check for incoming haptic OSC messages
   handleRouterOscInput(); 
-
-  // Check for the motor timeout (safety feature to stop motor if host dies)
   checkRealtimeTimeout();
-
-  // Handle web requests
   httpServer.handleClient();
-  
-  // Handle mDNS queries
   MDNS.update();
 }
