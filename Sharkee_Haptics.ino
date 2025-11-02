@@ -1,9 +1,9 @@
 /*
-  Sharkee_Haptics.ino
+  Sharkee_Haptics_Final_Curve_v19.ino
   
-  FIXED: All writeRegBits calls now include the required 0xFF bitmask.
-  FIXED: The setMotorLibraryEffect logic is reversed so high input intensity (1.0) 
-         results in high haptic output.
+  Goal: Achieve "super robust" haptics by relying entirely on a single intensity curve 
+        that changes both the amplitude (Gain) AND the texture (Effect/Waveform) based on 
+        the input value (0.0 to 1.0).
 */
 
 // *** Haptic Library Includes ***
@@ -60,19 +60,27 @@ bool inAPMode = false;
 
 // Network
 const unsigned int CLIENT_LISTENER_PORT = 8000;
+// Single Address: All VRChat haptic sources (petting, force, hits) should map to this one address.
 const char* INTERNAL_OSC_ADDRESS = "/sharkeehaptics/set_intensity";
 
 // Haptic Logic 
-const float MIN_INTENSITY_THRESHOLD = 0.05f; 
+const float MIN_INTENSITY_THRESHOLD = 0.05f; // Minimum input before activating
 const uint8_t LRA_LIBRARY = 6;              
 
-// Array of 10 LRA Library 6 Effects (Low to High Intensity Textures)
-const uint8_t MAX_EFFECT_ARRAY[] = {
-    4, 1, 11, 18, 37, 43, 47, 49, 64, 66
-};
-const int NUM_EFFECTS = sizeof(MAX_EFFECT_ARRAY) / sizeof(MAX_EFFECT_ARRAY[0]);
+// 1. PETTING ZONE: Low Intensity (0% - 33%) - Smooth, Sustained Hums
+const uint8_t PET_EFFECT_ARRAY[] = {1, 3, 5, 8, 11, 15, 20, 24, 28, 30}; 
+const int NUM_PET_EFFECTS = sizeof(PET_EFFECT_ARRAY) / sizeof(PET_EFFECT_ARRAY[0]);
 
-// Complex Waveform Sequence (Triggered at Index 9)
+// 2. FORCE ZONE: Medium Intensity (33% - 66%) - Stronger, Standard Thumps/Rumbles (Original array)
+const uint8_t FORCE_EFFECT_ARRAY[] = {4, 1, 11, 18, 37, 43, 47, 49, 64, 66}; 
+const int NUM_FORCE_EFFECTS = sizeof(FORCE_EFFECT_ARRAY) / sizeof(FORCE_EFFECT_ARRAY[0]);
+
+// 3. IMPACT ZONE: High Intensity (66% - 100%) - Sharp, High-Frequency Clicks/Bumps
+const uint8_t IMPACT_EFFECT_ARRAY[] = {68, 70, 72, 75, 78, 80, 82, 85, 87, 89}; 
+const int NUM_IMPACT_EFFECTS = sizeof(IMPACT_EFFECT_ARRAY) / sizeof(IMPACT_EFFECT_ARRAY[0]);
+
+
+// Complex Waveform Sequence (Triggered at Index 9 of the current array)
 const uint8_t FX_IMPACT_HIT = 49;     
 const uint8_t FX_RESIDUAL_HUM = 37;   
 const uint8_t FX_PAUSE = 0xFF;        
@@ -138,38 +146,57 @@ float getBatteryPercent() {
 }
 
 // ------------------------------------------------------------------
-// --- FIXED FUNCTION: Intensity Mapping is now FORWARD (0.0=Off, 1.0=Max) ---
+// --- CORE HAPTIC EXECUTION FUNCTION (Intensity Curve Logic) ---
 // ------------------------------------------------------------------
 void setMotorLibraryEffect(float intensity) {
-  // 1. Constrain the input 
   intensity = constrain(intensity, 0.0f, 1.0f);
   
-  // --- A. STOP CONDITION (Motor stops when 'intensity' is LOW) ---
+  // --- A. STOP CONDITION ---
   if (intensity < MIN_INTENSITY_THRESHOLD) { 
     drv.writeRegBits(REG_ODT_GAIN, 0xFF, 0x00); // Gain off
     drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY); // Standby
     return;
   }
   
-  // --- B. NORMALIZATION & MAPPING ---
-  // Normalize the intensity from [MIN_INTENSITY_THRESHOLD, 1.0] to [0.0, 1.0]
+  // --- B. NORMALIZATION ---
+  // Scale the input from the threshold up to 1.0 to a new 0.0 to 1.0 range
   float normalizedIntensity = (intensity - MIN_INTENSITY_THRESHOLD) / (1.0f - MIN_INTENSITY_THRESHOLD);
   normalizedIntensity = constrain(normalizedIntensity, 0.0f, 1.0f);
   
-  // Map normalized intensity to the 10 effects (0 to 9)
-  int effectIndex = (int)roundf(normalizedIntensity * (NUM_EFFECTS - 1));
+  // --- C. TEXTURE ZONES: Select Effect Array Based on Normalized Intensity ---
+  const uint8_t* current_effect_array = FORCE_EFFECT_ARRAY;
+  int num_effects = NUM_FORCE_EFFECTS;
   
-  // --- C. CALCULATE AMPLITUDE GAIN (Mapped to MIN_GAIN_VALUE to MAX_GAIN_VALUE: 20-127) ---
+  // Zone 1: Petting (0% - 33%)
+  if (normalizedIntensity <= 0.33f) {
+      current_effect_array = PET_EFFECT_ARRAY;
+      num_effects = NUM_PET_EFFECTS;
+  } 
+  // Zone 2: Force (33% - 66%) - uses the original array
+  else if (normalizedIntensity <= 0.66f) {
+      current_effect_array = FORCE_EFFECT_ARRAY;
+      num_effects = NUM_FORCE_EFFECTS;
+  } 
+  // Zone 3: Impact (66% - 100%)
+  else {
+      current_effect_array = IMPACT_EFFECT_ARRAY;
+      num_effects = NUM_IMPACT_EFFECTS;
+  }
+
+  // Map the normalized intensity to the 10 available effects in the selected array
+  int effectIndex = (int)roundf(normalizedIntensity * (num_effects - 1));
+  
+  // --- D. CALCULATE AMPLITUDE GAIN (Mapped to MIN_GAIN_VALUE to MAX_GAIN_VALUE: 20-127) ---
   // High normalizedIntensity results in high gain_value.
   uint8_t gain_value = (uint8_t)roundf(normalizedIntensity * (MAX_GAIN_VALUE - MIN_GAIN_VALUE)) + MIN_GAIN_VALUE;
   gain_value = constrain(gain_value, MIN_GAIN_VALUE, MAX_GAIN_VALUE); 
 
-  // --- D. EXECUTE WAVEFORM ---
+  // --- E. EXECUTE WAVEFORM ---
   drv.writeRegBits(REG_MODE, 0xFF, MODE_INTERNAL_TRIGGER); // Internal Trigger/Playback Mode
   drv.writeRegBits(REG_ODT_GAIN, 0xFF, gain_value); // Set Gain
  
-  if (effectIndex == SEQUENCE_TRIGGER_INDEX) {
-    // 10th level: COMPLEX HIT SEQUENCE (Highest intensity)
+  // Check for the complex sequence only at max intensity (index 9) in the highest texture zone (IMPACT)
+  if (effectIndex == SEQUENCE_TRIGGER_INDEX && current_effect_array == IMPACT_EFFECT_ARRAY) {
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, FX_IMPACT_HIT);    
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, FX_PAUSE);         
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 2, 0xFF, FX_RESIDUAL_HUM);  
@@ -177,8 +204,8 @@ void setMotorLibraryEffect(float intensity) {
     drv.writeRegBits(REG_GO, 0xFF, 0x01); // Go!
     
   } else {
-    // Levels 0-8: SINGLE EFFECT from the array
-    uint8_t effect_to_play = MAX_EFFECT_ARRAY[effectIndex];
+    // Single Effect from the currently selected array
+    uint8_t effect_to_play = current_effect_array[effectIndex];
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, effect_to_play); 
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, 0); // Terminate
     drv.writeRegBits(REG_GO, 0xFF, 0x01); // Go!
@@ -209,7 +236,7 @@ void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
 }
 
 // ------------------------------------
-// --- Network & Communication (Unchanged) ---
+// --- Network & Communication ---
 // ------------------------------------
 
 void handleRouterOscInput() {
@@ -223,6 +250,7 @@ void handleRouterOscInput() {
     char addressBuffer[64];
     msg.getAddress(addressBuffer);
 
+    // Listen only for the single, master intensity address
     if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
       float intensity = 0.0f;
       
@@ -230,6 +258,7 @@ void handleRouterOscInput() {
         intensity = msg.getFloat(0);
       } else if (msg.isInt(0)) {
         int val = msg.getInt(0);
+        // Map 0-255 or 0-100 integers to 0.0-1.0 float
         if (val > 1 && val <= 255) {
           intensity = (float)val / 255.0f;
         } else if (val >= 0 && val <= 100) {
@@ -255,7 +284,7 @@ void handleStatusJSON() {
   json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"haptic_mode\":\"10-Step Library + Ultra Low-Level Gain (0-127)\""; 
+  json += "\"haptic_mode\":\"Intensity Curve (Pet, Force, Impact Zones)\""; 
   json += "}";
   httpServer.send(200, "application/json", json);
 }
@@ -268,15 +297,24 @@ void handleConfigAction() {
     String action = httpServer.arg("action");
 
     if (action == "test_all") {
-      for(int i = 0; i < NUM_EFFECTS - 1; i++) {
-          float testNormalized = (float)i / (NUM_EFFECTS - 2);
-          uint8_t gain_percent = (uint8_t)roundf(testNormalized * 90.0f) + 10;
-          runTestWaveform(MAX_EFFECT_ARRAY[i], gain_percent);
-          delay(100); 
-      }
       
+      // Test the Petting Zone
+      for(int i = 0; i < NUM_PET_EFFECTS; i++) {
+          runTestWaveform(PET_EFFECT_ARRAY[i], 25);
+          delay(50); 
+      }
+      // Test the Force Zone
+      for(int i = 0; i < NUM_FORCE_EFFECTS; i++) {
+          runTestWaveform(FORCE_EFFECT_ARRAY[i], 55);
+          delay(50); 
+      }
+      // Test the Impact Zone
+      for(int i = 0; i < NUM_IMPACT_EFFECTS; i++) {
+          runTestWaveform(IMPACT_EFFECT_ARRAY[i], 90);
+          delay(50); 
+      }
+
       // Complex sequence test at max gain
-      // FIX: Added 0xFF mask
       drv.writeRegBits(REG_MODE, 0xFF, MODE_INTERNAL_TRIGGER);
       drv.writeRegBits(REG_ODT_GAIN, 0xFF, MAX_GAIN_VALUE); 
       
@@ -289,7 +327,7 @@ void handleConfigAction() {
       
       drv.writeRegBits(REG_ODT_GAIN, 0xFF, 0x00);
       drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY);
-      response = "Tested all 10 levels with amplitude ramping. Switched back to standby.";
+      response = "Tested all three texture zones and complex sequence. Switched back to standby.";
     }
     else if (action == "set_receiver" && httpServer.hasArg("index")) {
       int newIndex = httpServer.arg("index").toInt();
@@ -308,7 +346,7 @@ void handleConfigPage() {
     html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     html += "<style>body{font-family:Arial;background-color:#222;color:#eee;} .container{max-width:400px;margin:50px auto;padding:20px;background-color:#333;border-radius:8px;} h2{color:#4CAF50;} label, select, input, button{display:block;width:100%;margin-bottom:10px;padding:8px;border-radius:4px;} select, input{background-color:#444;color:#eee;border:1px solid #555;} button{background-color:#9C27B0;color:white;border:none;cursor:pointer;}</style>";
     html += "</head><body><div class='container'><h2>Max Expressive Haptics Config</h2>";
-    html += "<p>Mode: <b>10-Step Library + Ultra Low-Level Gain (0-127)</b></p>"; 
+    html += "<p>Mode: <b>Intensity Curve (Pet, Force, Impact Zones)</b></p>"; 
     html += "<p>Hostname: <b>" + String(receiverNames[assignedReceiverIndex]) + ".local</b></p>";
     html += "<p>IP Address: <b>" + WiFi.localIP().toString() + "</b></p>";
     html += "<p>Battery: <b>" + String((int)getBatteryPercent()) + "%</b></p>";
