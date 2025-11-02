@@ -1,8 +1,9 @@
 /*
- Sharkee_Haptics_Final_Expressive_v17.ino
- 
- FIXED: Added the required '0xFF' bitmask as the third argument to all 
- drv.writeRegBits() calls to comply with the library's function signature.
+  Sharkee_Haptics.ino
+  
+  FIXED: All writeRegBits calls now include the required 0xFF bitmask.
+  FIXED: The setMotorLibraryEffect logic is reversed so high input intensity (1.0) 
+         results in high haptic output.
 */
 
 // *** Haptic Library Includes ***
@@ -86,8 +87,8 @@ const uint8_t MAX_GAIN_VALUE = 127;    // Maximum gain value (0x7F)
 
 const int NUM_RECEIVERS = 11; 
 const char* receiverNames[NUM_RECEIVERS] = {
- "head", "chest", "upperarm_l", "upperarm_r", "hips", "upperleg_l",
- "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
+  "head", "chest", "upperarm_l", "upperarm_r", "hips", "upperleg_l",
+  "upperleg_r", "lowerleg_l", "lowerleg_r", "foot_l", "foot_r"
 };
 int assignedReceiverIndex = 0;
 
@@ -101,7 +102,7 @@ Haptic_DRV2605 drv;
 char incomingPacket[256];
 
 // ------------------------------------
-// --- Haptic Control: Core Logic (Library Fix) ---
+// --- Haptic Control: Core Logic ---
 // ------------------------------------
 
 void setupHaptics() {
@@ -128,45 +129,47 @@ void setupHaptics() {
 }
 
 float getBatteryPercent() {
- const float V_FULL = 4.2f;
- const float V_EMPTY = 3.3f;
- int raw = analogRead(BATTERY_LEVEL_PIN);
- float voltage = raw * (3.3f / 1023.0f);
- float percent = (voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100.0f;
- return constrain(percent, 0.0f, 100.0f);
+  const float V_FULL = 4.2f;
+  const float V_EMPTY = 3.3f;
+  int raw = analogRead(BATTERY_LEVEL_PIN);
+  float voltage = raw * (3.3f / 1023.0f);
+  float percent = (voltage - V_EMPTY) / (V_FULL - V_EMPTY) * 100.0f;
+  return constrain(percent, 0.0f, 100.0f);
 }
 
+// ------------------------------------------------------------------
+// --- FIXED FUNCTION: Intensity Mapping is now FORWARD (0.0=Off, 1.0=Max) ---
+// ------------------------------------------------------------------
 void setMotorLibraryEffect(float intensity) {
+  // 1. Constrain the input 
   intensity = constrain(intensity, 0.0f, 1.0f);
   
-  float invertedIntensity = 1.0f - intensity; 
-  
-  // --- A. STOP CONDITION ---
-  if (invertedIntensity < MIN_INTENSITY_THRESHOLD) {
-    // FIX: Added 0xFF mask
+  // --- A. STOP CONDITION (Motor stops when 'intensity' is LOW) ---
+  if (intensity < MIN_INTENSITY_THRESHOLD) { 
     drv.writeRegBits(REG_ODT_GAIN, 0xFF, 0x00); // Gain off
     drv.writeRegBits(REG_MODE, 0xFF, MODE_STANDBY); // Standby
     return;
   }
   
   // --- B. NORMALIZATION & MAPPING ---
-  float normalizedIntensity = (invertedIntensity - MIN_INTENSITY_THRESHOLD) / (1.0f - MIN_INTENSITY_THRESHOLD);
+  // Normalize the intensity from [MIN_INTENSITY_THRESHOLD, 1.0] to [0.0, 1.0]
+  float normalizedIntensity = (intensity - MIN_INTENSITY_THRESHOLD) / (1.0f - MIN_INTENSITY_THRESHOLD);
   normalizedIntensity = constrain(normalizedIntensity, 0.0f, 1.0f);
   
+  // Map normalized intensity to the 10 effects (0 to 9)
   int effectIndex = (int)roundf(normalizedIntensity * (NUM_EFFECTS - 1));
   
   // --- C. CALCULATE AMPLITUDE GAIN (Mapped to MIN_GAIN_VALUE to MAX_GAIN_VALUE: 20-127) ---
+  // High normalizedIntensity results in high gain_value.
   uint8_t gain_value = (uint8_t)roundf(normalizedIntensity * (MAX_GAIN_VALUE - MIN_GAIN_VALUE)) + MIN_GAIN_VALUE;
   gain_value = constrain(gain_value, MIN_GAIN_VALUE, MAX_GAIN_VALUE); 
 
   // --- D. EXECUTE WAVEFORM ---
-  // FIX: Added 0xFF mask
   drv.writeRegBits(REG_MODE, 0xFF, MODE_INTERNAL_TRIGGER); // Internal Trigger/Playback Mode
   drv.writeRegBits(REG_ODT_GAIN, 0xFF, gain_value); // Set Gain
-
+ 
   if (effectIndex == SEQUENCE_TRIGGER_INDEX) {
-    // 10th level: COMPLEX HIT SEQUENCE
-    // FIX: Added 0xFF mask
+    // 10th level: COMPLEX HIT SEQUENCE (Highest intensity)
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, FX_IMPACT_HIT);    
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, FX_PAUSE);         
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 2, 0xFF, FX_RESIDUAL_HUM);  
@@ -176,12 +179,12 @@ void setMotorLibraryEffect(float intensity) {
   } else {
     // Levels 0-8: SINGLE EFFECT from the array
     uint8_t effect_to_play = MAX_EFFECT_ARRAY[effectIndex];
-    // FIX: Added 0xFF mask
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 0, 0xFF, effect_to_play); 
     drv.writeRegBits(REG_WAVEFORM_SEQ_START + 1, 0xFF, 0); // Terminate
     drv.writeRegBits(REG_GO, 0xFF, 0x01); // Go!
   }
 }
+// ------------------------------------------------------------------
 
 // Helper to run a single waveform test
 void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
@@ -210,32 +213,32 @@ void runTestWaveform(uint8_t effect, uint8_t gain_percent) {
 // ------------------------------------
 
 void handleRouterOscInput() {
- int packetSize = Udp.parsePacket();
- if (packetSize != 0) {
-  int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
-  if (len <= 0) return;
-  OSCMessage msg;
-  msg.fill((uint8_t*)incomingPacket, len);
+  int packetSize = Udp.parsePacket();
+  if (packetSize != 0) {
+    int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
+    if (len <= 0) return;
+    OSCMessage msg;
+    msg.fill((uint8_t*)incomingPacket, len);
 
-  char addressBuffer[64];
-  msg.getAddress(addressBuffer);
+    char addressBuffer[64];
+    msg.getAddress(addressBuffer);
 
-  if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
-   float intensity = 0.0f;
-   
-   if (msg.isFloat(0)) {
-    intensity = msg.getFloat(0);
-   } else if (msg.isInt(0)) {
-    int val = msg.getInt(0);
-    if (val > 1 && val <= 255) {
-     intensity = (float)val / 255.0f;
-    } else if (val >= 0 && val <= 100) {
-     intensity = (float)val / 100.0f;
-    }
-   }
-   setMotorLibraryEffect(intensity); 
-  }
- }
+    if (strcmp(addressBuffer, INTERNAL_OSC_ADDRESS) == 0) {
+      float intensity = 0.0f;
+      
+      if (msg.isFloat(0)) {
+        intensity = msg.getFloat(0);
+      } else if (msg.isInt(0)) {
+        int val = msg.getInt(0);
+        if (val > 1 && val <= 255) {
+          intensity = (float)val / 255.0f;
+        } else if (val >= 0 && val <= 100) {
+          intensity = (float)val / 100.0f;
+        }
+      }
+      setMotorLibraryEffect(intensity); 
+    }
+  }
 }
 
 
@@ -244,17 +247,17 @@ void handleRouterOscInput() {
 // ------------------------------------
 
 void handleStatusJSON() {
- String json = "{";
- json += "\"role\":\"Client (Max Expressive Haptics)\","; 
- json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
- json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
- json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
- json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
- json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
- json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
- json += "\"haptic_mode\":\"10-Step Library + Ultra Low-Level Gain (0-127)\""; 
- json += "}";
- httpServer.send(200, "application/json", json);
+  String json = "{";
+  json += "\"role\":\"Client (Max Expressive Haptics)\","; 
+  json += "\"receiverName\":\"" + String(receiverNames[assignedReceiverIndex]) + "\",";
+  json += "\"hostname\":\"" + String(receiverNames[assignedReceiverIndex]) + ".local\",";
+  json += "\"listeningOn\":" + String(CLIENT_LISTENER_PORT) + ",";
+  json += "\"battery\":" + String((int)getBatteryPercent()) + ",";
+  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+  json += "\"haptic_mode\":\"10-Step Library + Ultra Low-Level Gain (0-127)\""; 
+  json += "}";
+  httpServer.send(200, "application/json", json);
 }
 
 void handleConfigAction() {
