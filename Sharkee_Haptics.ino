@@ -7,8 +7,9 @@
   connects in Station (STA) mode and runs the Haptics Router Client logic.
   
   - NOW LISTENS DIRECTLY TO VRChat OSC ADDRESSES (/avatar/parameters/Receiver_*)
+  - The IP filtering (Auto-Pairing) has been DISABLED to allow reception of
+    network broadcasts from the Python Rebroadcaster.
   - Includes Gamma correction and a Real-Time Playback (RTP) watchdog timer.
-  - UPDATED: The receiver list now matches the Unity editor "POSITION_DEFINITIONS_59" naming.
   
   Dependencies:
   - ESP8266WiFi, EEPROM, ESP8266mDNS, ArduinoOTA
@@ -36,23 +37,24 @@ constexpr unsigned int CLIENT_LISTENER_PORT = 9001;
 constexpr unsigned long REALTIME_TIMEOUT_MS = 500;
 constexpr float MIN_INTENSITY_THRESHOLD = 0.05f;
 constexpr int BATTERY_LEVEL_PIN = A0;
-
 // AP Mode settings
 constexpr const char* AP_SSID = "SharkeeHaptics-SETUP";
-constexpr const char* AP_PASS = "12345678"; // Min 8 chars for WPA2
+constexpr const char* AP_PASS = "12345678";
+// Min 8 chars for WPA2
 constexpr int DNS_PORT = 53;
 
 // ** 2. EEPROM Addresses **
-constexpr size_t EEPROM_SIZE = 512;       // Increased size for Wi-Fi credentials
+constexpr size_t EEPROM_SIZE = 512;
 constexpr uint8_t DEVICE_ID_ADDR = 0;     // ID (1 byte)
 constexpr uint8_t RECEIVER_NAME_ADDR = 1; // Index (1 byte)
 constexpr uint8_t GAMMA_ADDR = 2;         // Gamma (float, 4 bytes)
-constexpr uint8_t GAMMA_FLAG_ADDR = 6;    // Gamma flag (1 byte)
+constexpr uint8_t GAMMA_FLAG_ADDR = 6;
+// Gamma flag (1 byte)
 constexpr uint8_t WIFI_CONFIG_FLAG = 7;   // Config flag (1 byte)
 constexpr uint8_t WIFI_SSID_ADDR = 8;     // SSID (32 bytes max)
 constexpr uint8_t WIFI_PASS_ADDR = 40;    // Password (64 bytes max)
 // Paired host (auto-pair) storage
-constexpr uint8_t PAIRED_HOST_ADDR = 100;  // 4 bytes for IP
+constexpr uint8_t PAIRED_HOST_ADDR = 100; // 4 bytes for IP
 constexpr uint8_t PAIRED_HOST_FLAG_ADDR = 104; // flag byte
 
 // ** 3. VRChat Receiver Mapping (uses names from Unity editor configuration) **
@@ -84,7 +86,6 @@ constexpr const char* RECEIVER_NAMES[] = {
 };
 constexpr int NUM_RECEIVERS = sizeof(RECEIVER_NAMES) / sizeof(RECEIVER_NAMES[0]);
 constexpr const char* VRC_OSC_ADDRESS_PREFIX = "/avatar/parameters/Receiver_";
-
 // --- Global Objects and State ---
 ESP8266WebServer httpServer(80);
 WiFiUDP Udp;
@@ -96,12 +97,9 @@ int assignedReceiverIndex = 0;
 bool isAPMode = false;
 bool pairedHostSet = false;
 IPAddress pairedHost;
-
 // Storage for Wi-Fi credentials
 char sta_ssid[33] = "";
 char sta_password[65] = "";
-
-
 // ------------------------------------
 // --- HapticController Class (DRV2605 Encapsulation) ---
 // ------------------------------------
@@ -115,7 +113,7 @@ private:
 
   float applyGammaMapping(float intensity) {
     intensity = constrain(intensity, 0.0f, 1.0f);
-    // Apply Gamma correction for better low-end control on LRA motors
+// Apply Gamma correction for better low-end control on LRA motors
     return powf(intensity, gamma);
   }
 
@@ -141,7 +139,6 @@ public:
 
   void setIntensity(float intensity) {
     intensity = constrain(intensity, 0.0f, 1.0f);
-
     if (intensity < MIN_INTENSITY_THRESHOLD) {
       if (isMotorRunning) {
         drv.setRealtimeValue(0);
@@ -194,12 +191,12 @@ public:
     }
   }
 
-  float getGamma() const { return gamma; }
+  float getGamma() const { return gamma;
+  }
   void setGamma(float newGamma) {
     gamma = constrain(newGamma, 0.5f, 6.0f);
   }
 } hapticController;
-
 // ------------------------------------
 // --- EEPROM / Config Helpers ---
 // ------------------------------------
@@ -215,7 +212,8 @@ bool loadWifiConfig() {
   if (EEPROM.read(WIFI_CONFIG_FLAG) == 0xA5) {
     EEPROM.get(WIFI_SSID_ADDR, sta_ssid);
     EEPROM.get(WIFI_PASS_ADDR, sta_password);
-    sta_ssid[32] = '\0'; // Ensure null termination
+    sta_ssid[32] = '\0';
+// Ensure null termination
     sta_password[64] = '\0';
     return strlen(sta_ssid) > 0;
   }
@@ -287,7 +285,7 @@ void saveDeviceID(int id) {
 int loadAssignedReceiverIndex() {
   int idx = EEPROM.read(RECEIVER_NAME_ADDR);
   if (idx >= 0 && idx < NUM_RECEIVERS) return idx;
-  // Default to "Head" (index 0 in the Unity list)
+// Default to "Head" (index 0 in the Unity list)
   return 0; 
 }
 
@@ -325,36 +323,42 @@ void handleVRChatOscInput() {
   int len = Udp.read((uint8_t*)incomingPacket, sizeof(incomingPacket));
   if (len <= 0) return;
 
-  IPAddress remote = Udp.remoteIP();
-  // Auto-pair: if no paired host yet, save the first sender as the paired host
-  if (!pairedHostSet) {
-    savePairedHostToEEPROM(remote);
-    Serial.printf("Paired to host %s (auto)", remote.toString().c_str());
-  }
-  // If paired, ignore packets from other hosts
-  if (pairedHostSet && remote != pairedHost) {
-    return; // ignore
-  }
-
+  // ------------------------------------------------------------------
+  // *** FIX FOR BROADCAST: IP FILTERING/AUTO-PAIRING IS DISABLED ***
+  // Allows the device to receive packets from the Python rebroadcaster 
+  // without being restricted to a single IP.
+  // ------------------------------------------------------------------
+  // IPAddress remote = Udp.remoteIP();
+  // // Auto-pair: if no paired host yet, save the first sender as the paired host
+  // if (!pairedHostSet) {
+  //   savePairedHostToEEPROM(remote);
+  //   Serial.printf("Paired to host %s (auto)", remote.toString().c_str());
+  // }
+  // // If paired, ignore packets from other hosts
+  // if (pairedHostSet && remote != pairedHost) {
+  //   return; // ignore
+  // }
+  
   OSCMessage msg;
   msg.fill((uint8_t*)incomingPacket, len);
 
   char addressBuffer[128];
   msg.getAddress(addressBuffer);
   String addr = String(addressBuffer);
-
+  
   // Only respond to VRChat OSC addresses of the form:
   // /avatar/parameters/Receiver_<name>
   if (!addr.startsWith(VRC_OSC_ADDRESS_PREFIX)) return; // not a VRChat receiver message
 
   // Extract the receiver name after the prefix
   String recv = addr.substring(strlen(VRC_OSC_ADDRESS_PREFIX));
+  
   // Compare to this device's assigned receiver (case-insensitive)
-  if (!recv.equalsIgnoreCase(String(RECEIVER_NAMES[assignedReceiverIndex]))) return;
-
-  // We received an intensity update for *this* actuator
+  if (!recv.equalsIgnoreCase(String(RECEIVER_NAMES[assignedReceiverIndex]))) return; // We received an intensity update for *this* actuator
+  
   float intensity = 0.0f;
   bool dataFound = false;
+
   if (msg.isFloat(0)) {
     intensity = msg.getFloat(0);
     dataFound = true;
@@ -390,30 +394,46 @@ const char PROGMEM WEB_PAGE_STA[] = R"raw(
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #1a1a2e; color: #e4e4e4; margin: 0; padding: 20px; }
         .container { max-width: 520px; margin: 0 auto; background-color: #272747; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
-        h1 { text-align: center; color: #4CAF50; margin-bottom: 20px; }
+        h1 { 
+text-align: center; color: #4CAF50; margin-bottom: 20px; }
         .card { background-color: #313156; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
         .card-header { font-weight: bold; margin-bottom: 10px; color: #9C27B0; font-size: 1.1em; }
         label { display: block; margin-bottom: 5px; color: #ccc; }
         input[type="number"], input[type="text"], input[type="password"], select {
-            width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 5px; border: 1px solid #555; background-color: #44446a; color: #fff; box-sizing: border-box;
-        }
+            width: 100%;
+padding: 10px; margin-bottom: 10px; border-radius: 5px; border: 1px solid #555; background-color: #44446a; color: #fff; box-sizing: border-box;
+}
         button {
-            background-color: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; width: 100%; transition: background-color 0.3s ease, transform 0.1s ease;
-            font-weight: bold; margin-top: 5px;
+            background-color: #4CAF50;
+color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; width: 100%; transition: background-color 0.3s ease, transform 0.1s ease;
+font-weight: bold; margin-top: 5px;
         }
-        button.red { background-color: #f44336; }
-        button.red:hover { background-color: #e53935; }
-        button:hover { background-color: #45a049; }
-        button:active { transform: scale(0.98); }
-        .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
-        .status-item { background-color: #44446a; padding: 8px; border-radius: 5px; text-align: center; font-size: 0.9em; }
-        .status-value { font-weight: bold; font-size: 1.1em; color: #FFEB3B; }
-        #message { margin-top: 15px; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; }
-        #message.success { background-color: #1e872e; }
-        #message.error { background-color: #c73a3a; }
-        .hostname-display { grid-column: 1 / span 2; font-size: 0.8em; color: #aaa; text-align: center; padding-top: 5px; }
-        .inline { display: flex; gap: 8px; align-items:center; }
-        .small { width: 140px; margin-right: 8px; }
+        button.red { background-color: #f44336;
+}
+        button.red:hover { background-color: #e53935;
+}
+        button:hover { background-color: #45a049;
+}
+        button:active { transform: scale(0.98);
+}
+        .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;
+}
+        .status-item { background-color: #44446a; padding: 8px; border-radius: 5px; text-align: center; font-size: 0.9em;
+}
+        .status-value { font-weight: bold; font-size: 1.1em; color: #FFEB3B;
+}
+        #message { margin-top: 15px; padding: 10px; border-radius: 5px; text-align: center; font-weight: bold;
+}
+        #message.success { background-color: #1e872e;
+}
+        #message.error { background-color: #c73a3a;
+}
+        .hostname-display { grid-column: 1 / span 2; font-size: 0.8em; color: #aaa;
+text-align: center; padding-top: 5px; }
+        .inline { display: flex; gap: 8px; align-items:center;
+}
+        .small { width: 140px; margin-right: 8px;
+}
     </style>
 </head>
 <body>
@@ -426,7 +446,8 @@ const char PROGMEM WEB_PAGE_STA[] = R"raw(
             <div class="status-item">Device ID:<br><span id="display-id" class="status-value">?</span></div>
             <div class="status-item">Assigned:<br><span id="display-receiver" class="status-value">?</span></div>
             <div class="status-item">Battery:<br><span id="display-battery" class="status-value">?</span></div>
-            <div class="status-item">IP Address:<br><span id="display-ip" class="status-value">?</span></div>
+            
+<div class="status-item">IP Address:<br><span id="display-ip" class="status-value">?</span></div>
             <div class="hostname-display">mDNS Hostname: <span id="display-hostname" class="status-value" style="font-weight: normal; color: #81D4FA;">?</span></div>
         </div>
         <div id="message"></div>
@@ -445,157 +466,142 @@ const char PROGMEM WEB_PAGE_STA[] = R"raw(
     </div>
 
     <div class="card">
-        <div class="card-header">2. Set Device ID (Requires Restart for OTA)</div>
-        <label for="device-id-input">New Device ID (0-10):</label>
-        <input type="number" id="device-id-input" min="0" max="10" value="0">
-        <button onclick="setID()">Set ID & Restart</button>
+        <div class="card-header">2. Set Device ID (Requires Restart)</div>
+        <label for="device-id">ID (0-10):</label>
+        <input type="number" id="device-id" min="0" max="10" placeholder="e.g., 1">
+        <button onclick="setID()">Set Device ID</button>
     </div>
 
     <div class="card">
-        <div class="card-header">3. Test Haptic Motor (Realtime)</div>
-        <button onclick="testHaptic()">Run Realtime Test Ramp</button>
-    </div>
-
-    <div class="card">
-        <div class="card-header">4. Gamma Mapping</div>
-        <label for="gamma-input">Gamma (exponent) — higher => more low-end control (typical LRA 1.8–2.6)</label>
+        <div class="card-header">3. Calibration / Test</div>
         <div class="inline">
-            <input id="gamma-input" class="small" type="number" step="0.1" min="0.5" max="6.0" value="2.2">
-            <button onclick="setGamma()">Set Gamma</button>
+            <label for="gamma" class="small">Gamma (0.5-6.0):</label>
+            <input type="number" step="0.1" id="gamma" min="0.5" max="6.0" placeholder="2.2">
         </div>
-        <div style="margin-top:10px; font-size:0.9em; color:#ccc;">Current gamma: <span id="display-gamma">2.2</span></div>
+        <button onclick="setGamma()">Set Gamma Value</button>
+        <button onclick="testRamp()">Run Motor Test Ramp</button>
     </div>
+    
+    <div class="card">
+        <div class="card-header">4. Host Management (Auto-Pairing Disabled)</div>
+        <p style="font-size: 0.9em; color: #FFEB3B;">
+        The device is currently configured to listen to all network traffic for VRChat OSC. 
+        Auto-Pairing has been disabled to support the Python Rebroadcaster.</p>
+        <button onclick="clearPair()" class="red">Clear Stored Paired Host IP</button>
+    </div>
+
+
 </div>
-
 <script>
-    // Updated RECEIVER_NAMES list in JavaScript to match Unity `POSITION_DEFINITIONS_59`
-    const RECEIVER_NAMES = [
-      "Head", "Chest", "Spine", "Hips",
-
-      "UpperArm_L", "LowerArm_L", "Hand_L",
-
-      "UpperArm_R", "LowerArm_R", "Hand_R",
-
-      "UpperLeg_L", "LowerLeg_L", "Foot_L", "Toe_L",
-
-      "UpperLeg_R", "LowerLeg_R", "Foot_R", "Toe_R",
-
-      "Thumb_L_A", "Thumb_L_B", "Thumb_L_C",
-      "Index_L_A", "Index_L_B", "Index_L_C",
-      "Middle_L_A", "Middle_L_B", "Middle_L_C",
-      "Ring_L_A", "Ring_L_B", "Ring_L_C",
-      "Little_L_A", "Little_L_B", "Little_L_C",
-
-      "Thumb_R_A", "Thumb_R_B", "Thumb_R_C",
-      "Index_R_A", "Index_R_B", "Index_R_C",
-      "Middle_R_A", "Middle_R_B", "Middle_R_C",
-      "Ring_R_A", "Ring_R_B", "Ring_R_C",
-      "Little_R_A", "Little_R_B", "Little_R_C",
-
-      "Shoulder_L", "Shoulder_R", "Neck"
+    const receiverNames = [
+        "Head", "Chest", "Spine", "Hips",
+        "UpperArm_L", "LowerArm_L", "Hand_L",
+        "UpperArm_R", "LowerArm_R", "Hand_R",
+        "UpperLeg_L", "LowerLeg_L", "Foot_L", "Toe_L",
+        "UpperLeg_R", "LowerLeg_R", "Foot_R", "Toe_R",
+        "Thumb_L_A", "Thumb_L_B", "Thumb_L_C",
+        "Index_L_A", "Index_L_B", "Index_L_C",
+        "Middle_L_A", "Middle_L_B", "Middle_L_C",
+        "Ring_L_A", "Ring_L_B", "Ring_L_C",
+        "Little_L_A", "Little_L_B", "Little_L_C",
+        "Thumb_R_A", "Thumb_R_B", "Thumb_R_C",
+        "Index_R_A", "Index_R_B", "Index_R_C",
+        "Middle_R_A", "Middle_R_B", "Middle_R_C",
+        "Ring_R_A", "Ring_R_B", "Ring_R_C",
+        "Little_R_A", "Little_R_B", "Little_R_C",
+        "Shoulder_L", "Shoulder_R", "Neck"
     ];
-    const MAX_DEVICE_ID = 10;
-    const messageElement = document.getElementById('message');
-    const receiverSelect = document.getElementById('receiver-select');
 
-    RECEIVER_NAMES.forEach((name, index) => {
+    const select = document.getElementById('receiver-select');
+    receiverNames.forEach((name, index) => {
         const option = document.createElement('option');
         option.value = index;
-        // Format names nicely for display (e.g., "upper_arm_l" -> "Upper Arm L")
-        const formattedName = name.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-        option.textContent = formattedName; 
-        receiverSelect.appendChild(option);
+        option.textContent = name;
+        select.appendChild(option);
     });
 
-    function showMessage(msg, type = 'success') {
-        messageElement.textContent = msg;
-        messageElement.className = (type === 'success') ? 'success' : 'error';
+    function showMessage(msg, type) {
+        const el = document.getElementById('message');
+        el.textContent = msg;
+        el.className = '';
+        el.classList.add(type);
+    }
+
+    function sendAction(action, params = {}) {
+        const url = new URL(window.location.href + 'action');
+        url.searchParams.append('action', action);
+        for (const key in params) {
+            url.searchParams.append(key, params[key]);
+        }
+        
+        fetch(url, { method: 'POST' })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                return response.text();
+            })
+            .then(data => {
+                showMessage(data, 'success');
+                if (data.includes("Restarting")) {
+                    // Prevent immediate refresh if device is rebooting
+                } else if (action === 'set_gamma') {
+                    // Update the displayed gamma value immediately
+                    fetchData();
+                }
+            })
+            .catch(error => {
+                showMessage(`Error: ${error.message}`, 'error');
+                console.error('Action failed:', error);
+            });
     }
 
     function fetchData() {
         fetch('/status_json')
             .then(response => response.json())
             .then(data => {
-                document.getElementById('display-id').textContent = data.deviceID === -1 ? 'UNSET' : data.deviceID;
-                
-                // Format receiver name for display
-                const rawReceiverName = RECEIVER_NAMES[data.receiverIndex];
-                const formattedReceiverName = rawReceiverName.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-
-                document.getElementById('display-receiver').textContent = formattedReceiverName.toUpperCase();
-                document.getElementById('display-battery').textContent = `${data.battery}%`;
+                document.getElementById('display-id').textContent = data.deviceID === -1 ? 'N/A' : data.deviceID;
+                document.getElementById('display-receiver').textContent = data.receiverName;
+                document.getElementById('display-battery').textContent = data.battery + '%';
                 document.getElementById('display-ip').textContent = data.ip;
                 document.getElementById('display-hostname').textContent = data.hostname;
-                document.getElementById('display-gamma').textContent = parseFloat(data.gamma).toFixed(2);
-                
-                // Set form values
-                receiverSelect.value = data.receiverIndex;
-                document.getElementById('gamma-input').value = parseFloat(data.gamma).toFixed(2);
-
-                const idDisplay = document.getElementById('display-id');
-                idDisplay.style.color = (data.deviceID === -1) ? 'red' : '#FFEB3B';
-                const batteryDisplay = document.getElementById('display-battery');
-                batteryDisplay.style.color = (data.battery < 20) ? 'red' : '#FFEB3B';
-
-                setTimeout(fetchData, 3000);
+                document.getElementById('gamma').value = data.gamma;
+                document.getElementById('device-id').value = data.deviceID === -1 ? '' : data.deviceID;
+                document.getElementById('receiver-select').value = data.receiverIndex;
             })
             .catch(error => {
-                document.getElementById('display-id').textContent = 'ERR';
-                document.getElementById('display-ip').textContent = 'WIFI DOWN';
-                console.error('Error fetching status:', error);
-                setTimeout(fetchData, 5000);
+                console.error('Failed to fetch status:', error);
+                showMessage('Failed to connect to device status.', 'error');
             });
     }
 
-    function sendAction(action, data = {}) {
-        messageElement.className = '';
-        messageElement.textContent = 'Processing...';
-        const formData = new URLSearchParams();
-        formData.append('action', action);
-        for (const key in data) formData.append(key, data[key]);
-        return fetch('/action', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: formData
-        })
-        .then(response => {
-            if (!response.ok) return response.text().then(text => { throw new Error(text || response.statusText); });
-            return response.text();
-        })
-        .then(text => {
-            showMessage(text);
-            if (action !== 'test' && !text.includes('Restarting')) fetchData();
-        })
-        .catch(error => showMessage(`Error: ${error.message}`, 'error'));
+    function setReceiver() {
+        const index = document.getElementById('receiver-select').value;
+        sendAction('set_receiver', { index: index });
     }
 
     function setID() {
-        const idInput = document.getElementById('device-id-input').value;
-        const id = parseInt(idInput);
-        if (id >= 0 && id <= MAX_DEVICE_ID) sendAction('set_id', { id: id });
-        else showMessage("ID must be between 0 and 10.", 'error');
-    }
-
-    function setReceiver() {
-        const index = parseInt(receiverSelect.value);
-        if (index >= 0 && index < RECEIVER_NAMES.length) sendAction('set_receiver', { index: index });
-    }
-
-    function testHaptic() {
-        sendAction('test');
+        const id = document.getElementById('device-id').value;
+        sendAction('set_id', { id: id });
     }
 
     function setGamma() {
-        const g = parseFloat(document.getElementById('gamma-input').value);
-        if (isNaN(g) || g < 0.5 || g > 6.0) {
-            showMessage("Gamma must be between 0.5 and 6.0", 'error');
-            return;
-        }
-        sendAction('set_gamma', { gamma: g });
+        const gamma = document.getElementById('gamma').value;
+        sendAction('set_gamma', { gamma: gamma });
+    }
+
+    function testRamp() {
+        sendAction('test');
     }
     
     function clearWifi() {
-        sendAction('clear_wifi');
+        if (confirm("WARNING: This will erase saved Wi-Fi credentials and restart the device into AP Mode. Continue?")) {
+            sendAction('clear_wifi');
+        }
+    }
+    
+    function clearPair() {
+        sendAction('clear_pair');
     }
 
     document.addEventListener('DOMContentLoaded', fetchData);
@@ -610,39 +616,50 @@ const char PROGMEM WEB_PAGE_AP[] = R"raw(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Wi-Fi Setup Portal</title>
+    <title>Sharkee Haptics Config (AP Mode)</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #1a1a2e; color: #e4e4e4; margin: 0; padding: 20px; text-align: center; }
-        .container { max-width: 400px; margin: 50px auto; background-color: #272747; padding: 25px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0, 0, 0, 0.6); }
-        h1 { color: #FFD700; margin-bottom: 10px; }
-        h2 { color: #81D4FA; font-size: 1.1em; margin-bottom: 20px; }
-        label { display: block; margin-bottom: 5px; color: #ccc; text-align: left; font-weight: bold; }
+        body { font-family: 'Inter', sans-serif; background-color: #1a1a2e; color: #e4e4e4; margin: 0; padding: 20px; }
+        .container { max-width: 400px; margin: 50px auto; background-color: #272747; padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+        h1 { text-align: center; color: #FFEB3B; margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; color: #ccc; }
         input[type="text"], input[type="password"] {
-            width: 100%; padding: 12px; margin-bottom: 20px; border-radius: 8px; border: none; background-color: #44446a; color: #fff; box-sizing: border-box;
-            font-size: 1.1em;
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            border: 1px solid #555;
+            background-color: #44446a;
+            color: #fff;
+            box-sizing: border-box;
         }
         button {
-            background-color: #4CAF50; color: white; padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; width: 100%; transition: background-color 0.3s ease, transform 0.1s ease;
-            font-weight: bold; font-size: 1.2em;
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            width: 100%;
+            font-weight: bold;
+            transition: background-color 0.3s ease;
         }
         button:hover { background-color: #45a049; }
-        .status { margin-top: 20px; padding: 10px; border-radius: 5px; background-color: #313156; color: #fff; }
+        .info { font-size: 0.9em; color: #9C27B0; text-align: center; margin-bottom: 20px; }
     </style>
 </head>
 <body>
 <div class="container">
-    <h1>Wi-Fi Setup Portal</h1>
-    <h2>Connect to your network to enable haptics.</h2>
-    <div class="status">
-        Access Point: <strong>%AP_SSID%</strong> (Password: <strong>%AP_PASS%</strong>)
+    <h1>Wi-Fi Setup (AP Mode)</h1>
+    <div class="info">
+        Connect to network **%AP_SSID%** (password: **%AP_PASS%**) to access this portal.
     </div>
-    <form method="POST" action="/save_wifi" style="margin-top: 30px;">
-        <label for="ssid">Target Wi-Fi SSID:</label>
-        <input type="text" id="ssid" name="ssid" placeholder="Your Home Wi-Fi Name" required>
+    <form action="/save_wifi" method="POST">
+        <label for="ssid">Wi-Fi SSID (Name):</label>
+        <input type="text" id="ssid" name="ssid" required>
 
-        <label for="pass">Target Wi-Fi Password:</label>
-        <input type="password" id="pass" name="pass" placeholder="Your Wi-Fi Password" required>
+        <label for="pass">Wi-Fi Password:</label>
+        <input type="password" id="pass" name="pass" required>
 
         <button type="submit">Save & Connect</button>
     </form>
@@ -672,7 +689,6 @@ void handleSaveWifi() {
 
   String newSsid = httpServer.arg("ssid");
   String newPass = httpServer.arg("pass");
-  
   if (newSsid.length() > 32 || newPass.length() > 64) {
       httpServer.send(400, "text/plain", "SSID or Password too long.");
       return;
@@ -692,13 +708,11 @@ void handleSaveWifi() {
 void handleConfigAction() {
   String response = "OK";
   int status_code = 200;
-
   if (httpServer.method() != HTTP_POST) {
       status_code = 405;
       response = "Method not allowed.";
   } else if (httpServer.hasArg("action")) {
     String action = httpServer.arg("action");
-
     if (action == "clear_wifi") {
         clearWifiConfig();
         response = "Wi-Fi configuration cleared. Restarting to AP Mode...";
@@ -745,7 +759,8 @@ void handleConfigAction() {
       float newGamma = httpServer.arg("gamma").toFloat();
       if (newGamma >= 0.5f && newGamma <= 6.0f) {
         hapticController.setGamma(newGamma);
-        saveGammaToEEPROM(); // Persist the new gamma
+        saveGammaToEEPROM();
+// Persist the new gamma
         response = "Gamma updated to " + String(hapticController.getGamma(), 2) + ".";
       } else {
         status_code = 400;
@@ -800,7 +815,6 @@ void setupAPMode() {
 
   IPAddress apIP(192, 168, 4, 1);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-
   Serial.print("AP IP address: ");
   Serial.println(WiFi.softAPIP());
 
@@ -823,6 +837,7 @@ void setupAPMode() {
       return;
     }
     // Windows/Apple probes
+ 
     if (uri == "/ncsi.txt" || uri == "/hotspot-detect.html") {
       httpServer.send(200, "text/plain", "OK");
       return;
@@ -840,7 +855,6 @@ void setupSTAMode() {
   isAPMode = false;
   WiFi.mode(WIFI_STA);
   WiFi.begin(sta_ssid, sta_password);
-  
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 60) {
     delay(500);
@@ -850,8 +864,7 @@ void setupSTAMode() {
   
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWiFi connected! IP: " + WiFi.localIP().toString());
-    
-    // Haptics Client Setup (only if connected)
+// Haptics Client Setup (only if connected)
     setupMDNS();
     httpServer.on("/", HTTP_GET, handleRoot);
     httpServer.on("/status_json", HTTP_GET, handleStatusJSON);
@@ -872,7 +885,6 @@ void setupSTAMode() {
     }
     ArduinoOTA.begin();
     Serial.println("OTA ready.");
-    
   } else {
     // Failed to connect - reboot to AP mode to retry configuration
     Serial.println("\nFailed to connect to Wi-Fi. Rebooting to AP Mode...");
